@@ -168,5 +168,5 @@ def _record_from_element(elem: ET.Element) -> Record:
         end=_parse_apple_datetime(elem.attrib["endDate"]),
         value=elem.attrib.get("value"),
         unit=elem.attrib.get("unit"),
-        source_name=elem.attrib["sourceName"],
+        source_name=elem.attrib.get("sourceName", ""),
     )
