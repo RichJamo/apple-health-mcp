@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SYNTHETIC Apple Health export for tests. All values invented; no real data.
+     Shaped like HealthKit Export Version 14 (see docs/architecture.md). -->
+<HealthData locale="en_ZA">
+ <ExportDate value="2026-11-19 14:49:01 +0200"/>
+ <!-- Me block carries sensitive characteristics; the parser must ignore it. -->
+ <Me HKCharacteristicTypeIdentifierBiologicalSex="HKBiologicalSexNotSet"
+     HKCharacteristicTypeIdentifierBloodType="HKBloodTypeNotSet"/>
+
+ <!-- Workout 1: energy lives in a WorkoutStatistics child (ActiveEnergyBurned),
+      NOT a totalEnergyBurned attribute. Metadata entries are duplicated, as Apple
+      really does, and must collapse to one key each. -->
+ <Workout workoutActivityType="HKWorkoutActivityTypeElliptical" duration="32.5" durationUnit="min"
+          sourceName="Test Watch" startDate="2019-01-22 08:05:11 +0200" endDate="2019-01-22 08:37:34 +0200">
+  <MetadataEntry key="HKIndoorWorkout" value="0"/>
+  <MetadataEntry key="HKTimeZone" value="Africa/Johannesburg"/>
+  <WorkoutStatistics type="HKQuantityTypeIdentifierActiveEnergyBurned" sum="325.774" unit="kcal"/>
+  <WorkoutStatistics type="HKQuantityTypeIdentifierBasalEnergyBurned" sum="57.7682" unit="kcal"/>
+  <MetadataEntry key="HKIndoorWorkout" value="0"/>
+  <MetadataEntry key="HKTimeZone" value="Africa/Johannesburg"/>
+ </Workout>
+
+ <Record type="HKQuantityTypeIdentifierHeartRate" sourceName="Test Watch" unit="count/min"
+         value="92" startDate="2019-01-22 08:10:00 +0200" endDate="2019-01-22 08:10:00 +0200"/>
+
+ <!-- Workout 2: has a HeartRate WorkoutStatistics (avg/min/max). -->
+ <Workout workoutActivityType="HKWorkoutActivityTypeHighIntensityIntervalTraining" duration="30" durationUnit="min"
+          sourceName="Test Watch" startDate="2026-10-11 06:00:00 +0200" endDate="2026-10-11 06:30:00 +0200">
+  <WorkoutStatistics type="HKQuantityTypeIdentifierActiveEnergyBurned" sum="300.0" unit="kcal"/>
+  <WorkoutStatistics type="HKQuantityTypeIdentifierHeartRate" average="140" minimum="95" maximum="175" unit="count/min"/>
+ </Workout>
+
+ <Record type="HKQuantityTypeIdentifierHeartRate" sourceName="Test Watch" unit="count/min"
+         value="150" startDate="2026-10-11 06:05:00 +0200" endDate="2026-10-11 06:05:00 +0200"/>
+ <Record type="HKQuantityTypeIdentifierHeartRate" sourceName="Test Watch" unit="count/min"
+         value="170" startDate="2026-10-11 06:20:00 +0200" endDate="2026-10-11 06:20:00 +0200"/>
+ <Record type="HKQuantityTypeIdentifierRestingHeartRate" sourceName="Test Watch" unit="count/min"
+         value="58" startDate="2026-10-11 07:00:00 +0200" endDate="2026-10-11 07:00:00 +0200"/>
+
+ <!-- Workout 3: no WorkoutStatistics at all -> active energy is None. -->
+ <Workout workoutActivityType="HKWorkoutActivityTypeYoga" duration="20" durationUnit="min"
+          sourceName="Test Watch" startDate="2026-10-12 07:00:00 +0200" endDate="2026-10-12 07:20:00 +0200">
+  <MetadataEntry key="HKIndoorWorkout" value="1"/>
+ </Workout>
+
+ <Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="Test Watch"
+         value="HKCategoryValueSleepAnalysisAsleepCore"
+         startDate="2026-10-11 23:00:00 +0200" endDate="2026-10-12 05:30:00 +0200"/>
+</HealthData>
