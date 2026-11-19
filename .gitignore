@@ -1,0 +1,31 @@
+# Sensitive health data
+data/
+exports/
+*.sqlite
+*.sqlite3
+*.db
+export.zip
+export.xml
+export_cda.xml
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+
+# Python
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# macOS and Xcode
+.DS_Store
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Local IDE settings
+.vscode/
