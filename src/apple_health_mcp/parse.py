@@ -153,18 +153,19 @@ def _workout_from_element(elem: ET.Element) -> Workout:
     )
 
 
-def iter_records(source, types: Iterable[str] | None = None) -> Iterator[Record]:
-    """Yield a :class:`Record` for every ``<Record>`` in the export.
+def iter_records(source, types: Iterable[str] | None =None) -> Iterator[Record]:
+    wanted = set(types) if types is not None else None
+    for elem in _iter_elements(source, "Record"):
+        if wanted is None or elem.attrib["type"] in wanted:
+            yield _record_from_element(elem)
 
-    RICH'S TASK (the pair-session half). Contract to implement:
-    - Stream ``<Record>`` elements using ``_iter_elements(source, "Record")`` — reuse
-      it, don't re-open the file a different way.
-    - If ``types`` is given, yield only records whose ``type`` attribute is in it;
-      if ``types`` is ``None``, yield them all. (A ``set`` makes the check fast.)
-    - Build each :class:`Record` from the element's attributes, using
-      ``_parse_apple_datetime`` for ``startDate``/``endDate``. ``value`` and ``unit``
-      are optional — use ``.attrib.get(...)`` so a missing one becomes ``None``.
-
-    Mirror the shape of ``iter_workouts`` + ``_workout_from_element`` above.
-    """
-    raise NotImplementedError("iter_records: pair-session task — see the contract in this docstring")
+def _record_from_element(elem: ET.Element) -> Record:
+    """Build a :class:`Record` from one ``<Record>`` element."""
+    return Record(
+        type=elem.attrib["type"],
+        start=_parse_apple_datetime(elem.attrib["startDate"]),
+        end=_parse_apple_datetime(elem.attrib["endDate"]),
+        value=elem.attrib.get("value"),
+        unit=elem.attrib.get("unit"),
+        source_name=elem.attrib["sourceName"],
+    )
