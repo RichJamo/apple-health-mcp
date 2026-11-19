@@ -93,9 +93,34 @@ data-free schema):
 
 - **Longitudinal fitness:** VO2 Max (~390 readings), resting HR (~2,688), HRV SDNN
   (~10,129) — enough for a 7-year "how regularly / how fit" trend.
-- **Heart-rate recovery:** 232 `HeartRateRecoveryOneMinute` records exist already;
-  and because the Watch keeps logging HR after a workout ends, recovery can also be
-  computed from the window after `endDate` even when the user stops without a cooldown.
+
+### Heart-rate recovery (committed — capture now, compute at analysis)
+
+How fast heart rate falls after a workout is a wanted feature, so the pipeline is
+designed to preserve it from the start, even though the recovery *number* is computed
+later. Two independent sources:
+
+- **Apple's own figure:** 232 `HeartRateRecoveryOneMinute` records (2022+, the
+  watchOS 9 feature — verified: none before 2022). Ingest these as an ordinary metric;
+  they give Apple's one-minute recovery for the workouts that have it, as a cross-check.
+- **Computed from samples:** the Watch keeps logging heart rate in the background after
+  a workout ends, so recovery can be computed from the `HeartRate` records in the window
+  *after* `endDate` (e.g. HR at end vs. one and two minutes later) — no cooldown needed.
+
+Two design consequences, to honour when we build ingest and analyze:
+
+1. **Ingestion must keep a post-workout tail.** When selecting which `HeartRate` samples
+   to import, use `[start, end + RECOVERY_WINDOW]` per workout (RECOVERY_WINDOW ≈ 5 min),
+   not just `[start, end]`, or the very samples recovery needs get dropped. Also import
+   the `HeartRateRecoveryOneMinute` records.
+2. **Recovery is derived, not stored raw.** It is computed in `analyze.py`
+   (`heart_rate_recovery(workout)`) from samples already in the DB. The four-table model
+   needs no new column now; if we later cache the figure, it belongs in a derived
+   `workout_metrics` table, never mixed into raw `samples`.
+
+Timing: the *capture* half rides along with `ingest` (the next build step); the *compute*
+half lands with the first training summary in `analyze.py`. So it is part of milestone 1,
+not deferred to a later phase.
 
 ## 5. Data model (SQLite)
 
