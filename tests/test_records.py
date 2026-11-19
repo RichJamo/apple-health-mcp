@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from apple_health_mcp.parse import Record, iter_records
+from apple_health_mcp.parse import iter_records
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_export.xml"
 SAST = timezone(timedelta(hours=2))
@@ -28,5 +28,5 @@ def test_record_fields_and_offset():
 
 def test_missing_unit_becomes_none():
     sleep = next(iter_records(FIXTURE, types={"HKCategoryTypeIdentifierSleepAnalysis"}))
-    assert sleep.unit is None          # the sleep Record has no unit attribute
+    assert sleep.unit is None  # the sleep Record has no unit attribute
     assert sleep.value == "HKCategoryValueSleepAnalysisAsleepCore"

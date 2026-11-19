@@ -14,10 +14,10 @@ Both take ``source`` = a path (str or ``os.PathLike``) or an open binary file.
 
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
-import xml.etree.ElementTree as ET
 
 # Apple writes timestamps as e.g. "2019-01-22 08:05:11 +0200": local time plus a
 # UTC offset. %z parses the offset, so the resulting datetime is timezone-aware and
@@ -153,11 +153,12 @@ def _workout_from_element(elem: ET.Element) -> Workout:
     )
 
 
-def iter_records(source, types: Iterable[str] | None =None) -> Iterator[Record]:
+def iter_records(source, types: Iterable[str] | None = None) -> Iterator[Record]:
     wanted = set(types) if types is not None else None
     for elem in _iter_elements(source, "Record"):
         if wanted is None or elem.attrib["type"] in wanted:
             yield _record_from_element(elem)
+
 
 def _record_from_element(elem: ET.Element) -> Record:
     """Build a :class:`Record` from one ``<Record>`` element."""

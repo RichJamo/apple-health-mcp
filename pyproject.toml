@@ -18,7 +18,7 @@ dependencies = []
 
 # Development-only tools, installed by `uv sync` but not shipped to users.
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.6"]
 
 [build-system]
 requires = ["hatchling"]
@@ -32,3 +32,13 @@ packages = ["src/apple_health_mcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# pycodestyle (E/W), pyflakes (F), isort (I), pyupgrade (UP)
+select = ["E", "F", "W", "I", "UP"]
+# line length is the formatter's concern; don't fail the build on a long comment
+ignore = ["E501"]
