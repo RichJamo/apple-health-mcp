@@ -69,3 +69,40 @@ def test_fields_round_trip(conn):
     assert row is not None
     assert row[0] == "HKWorkoutActivityTypeElliptical"
     assert row[1] == 325.774
+
+
+def test_statistic_less_workout_stores_null_energy(conn):
+    """A workout with no energy statistic (Yoga) is stored with NULL, not rejected.
+
+    The schema must accept the absent value as NULL. If a NOT NULL constraint or a
+    non-null default ever crept in, every statistic-less session (yoga, stretching)
+    would be silently dropped or corrupted — so assert the row exists and its energy
+    is NULL, rather than trusting the import count alone.
+    """
+    upsert_workouts(conn, iter_workouts(FIXTURE))
+
+    row = conn.execute(
+        "SELECT active_energy_kcal FROM workouts WHERE activity_type = ?",
+        ("HKWorkoutActivityTypeYoga",),
+    ).fetchone()
+
+    assert row is not None  # the row was stored, not rejected
+    assert row[0] is None  # and its energy is NULL
+
+
+def test_timestamp_stored_as_utc_with_zone_preserved(conn):
+    """start_utc is the moment in UTC; tz keeps the original zone, so neither is lost.
+
+    The fixture's Elliptical workout starts 2019-01-22 08:05:11 +0200, which is
+    06:05:11 UTC. The offset is not discarded: the original zone name is kept in tz.
+    """
+    upsert_workouts(conn, iter_workouts(FIXTURE))
+
+    row = conn.execute(
+        "SELECT start_utc, tz FROM workouts WHERE activity_type = ?",
+        ("HKWorkoutActivityTypeElliptical",),
+    ).fetchone()
+
+    assert row is not None
+    assert row[0] == "2019-01-22T06:05:11+00:00"  # +0200 converted to UTC
+    assert row[1] == "Africa/Johannesburg"  # HKTimeZone metadata, preserved
