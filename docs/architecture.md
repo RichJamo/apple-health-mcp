@@ -171,8 +171,13 @@ fall within 3 minutes of each other, and every such pair comes from two differen
 sources — mostly a surf-tracking app plus the Watch, a few Strava plus the Watch. Each
 is one session stored twice, because `workout_id` includes the source. Heart rate is
 unaffected (each reading is stored once), but session counts and weekly minutes would
-count these twice. Where to remove the duplicate — at import, or in analysis — is the
-open decision.
+count these twice.
+
+**Decided (Rich):** keep both rows as recorded, and de-duplicate in `analyze.py`. When
+two sources record overlapping sessions of the same type, the summary counts the
+session once and prefers the Apple Watch record, since the heart rate comes from the
+Watch. Import stays a faithful copy of the export, so nothing the other app recorded
+is lost.
 
 ## 6. Privacy model
 
