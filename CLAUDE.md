@@ -24,7 +24,8 @@ dependencies; preserve behaviour unless asked.
 ## How rules are enforced (ported from audit-toolkit)
 A rule written only in prose is a suggestion. A rule that must not bend and would
 fail silently belongs outside the model — a test, a CI check, or a hook.
-- The test suite is the spec, enforced by CI (GitHub Actions); a red suite blocks merge.
+- The test suite is the spec. CI (`.github/workflows/ci.yml`) runs it with ruff on
+  every PR, and branch protection on main requires it to pass, so a red suite blocks merge.
 - Don't weaken or delete a test to make code pass. If a test must change, the
   commit says why. If this recurs, it becomes a guard, not another line here.
 - Don't claim a check passed unless it ran; if a tool is missing, fall back and say so.

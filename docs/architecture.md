@@ -122,6 +122,27 @@ Timing: the *capture* half rides along with `ingest` (the next build step); the 
 half lands with the first training summary in `analyze.py`. So it is part of milestone 1,
 not deferred to a later phase.
 
+**Capture is implemented** (`ingest.py`). Only heart-rate readings inside some workout's
+`[start, end + 5 min]` window are stored (Rich's choice: smaller and more private than
+keeping every reading). Apple's `HeartRateRecoveryOneMinute` records go through the same
+window, which on the first real export kept every one of them. Workouts overlap in real
+exports, mostly because one session is recorded twice by different sources: a surf
+tracking app or Strava, and the Watch's own workout, with start and end seconds apart.
+So a reading is kept if *any* window holds it; its `workout_id` names one such workout,
+and recovery analysis should select readings by time range rather than by `workout_id`.
+These double recordings also mean the `workouts` table holds some sessions twice — see
+"Source dedup" in §5.
+
+### Malformed records (decided, issue #3)
+
+Ingest skips a record it cannot parse and counts it, so one bad row in years of data
+does not stop an import; the summary line reports how many were skipped. `--strict`
+aborts on the first one instead and exits with code 1. Either way the output names only
+the record type: Python's own parse errors quote the raw timestamp, so `iter_records`
+raises `MalformedRecordError` in their place (`from None`), and the skip callback is
+given the type alone. Workout parsing does not follow this contract yet: a malformed
+workout still raises Python's own error, which can quote raw text (tracked in #3).
+
 ## 5. Data model (SQLite)
 
 Four tables keep raw-ish records separate from derived summaries and keep subjective
@@ -145,6 +166,19 @@ never duplicates.
 Watch, the iPhone and third-party apps. Likely rule: prefer the Apple Watch source
 for workouts. Made explicit and documented rather than chosen silently.
 
+Seen in the first real export: at least 32 pairs of workouts whose start and end both
+fall within 3 minutes of each other, and every such pair comes from two different
+sources — mostly a surf-tracking app plus the Watch, a few Strava plus the Watch. Each
+is one session stored twice, because `workout_id` includes the source. Heart rate is
+unaffected (each reading is stored once), but session counts and weekly minutes would
+count these twice.
+
+**Decided (Rich):** keep both rows as recorded, and de-duplicate in `analyze.py`. When
+two sources record overlapping sessions of the same type, the summary counts the
+session once and prefers the Apple Watch record, since the heart rate comes from the
+Watch. Import stays a faithful copy of the export, so nothing the other app recorded
+is lost.
+
 ## 6. Privacy model
 
 - Raw exports stay in gitignored `exports/`; never committed, never sent to an AI.
@@ -157,5 +191,6 @@ for workouts. Made explicit and documented rather than chosen silently.
 
 uv-managed (`pyproject.toml`, committed `uv.lock`). Core parser and storage use only
 Python's standard library (`xml`, `sqlite3`); the MCP SDK is the one substantial
-dependency, added in Phase 2. Tests: pytest. CI (GitHub Actions) runs the suite and
-blocks merge on failure.
+dependency, added in Phase 2. Tests: pytest. CI (GitHub Actions) runs ruff and the
+suite on Python 3.11 and 3.12 for every pull request, and branch protection on `main`
+makes a failure block the merge.

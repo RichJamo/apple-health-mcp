@@ -7,7 +7,8 @@ accumulated children) as we go. See ``docs/architecture.md`` for the data facts.
 
 Public API:
 - ``iter_workouts(source)``  -> yields :class:`Workout`
-- ``iter_records(source, types=None)`` -> yields :class:`Record`   (Rich's task)
+- ``iter_records(source, types=None, *, on_skip=None)`` -> yields :class:`Record`
+- ``MalformedRecordError`` -> raised by ``iter_records`` in strict mode (no ``on_skip``)
 
 Both take ``source`` = a path (str or ``os.PathLike``) or an open binary file.
 """
@@ -15,7 +16,7 @@ Both take ``source`` = a path (str or ``os.PathLike``) or an open binary file.
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -23,6 +24,16 @@ from datetime import datetime
 # UTC offset. %z parses the offset, so the resulting datetime is timezone-aware and
 # we never lose which offset the reading was taken in.
 _APPLE_DATETIME = "%Y-%m-%d %H:%M:%S %z"
+
+
+class MalformedRecordError(ValueError):
+    """A ``<Record>`` could not be parsed. Its message names only the record type.
+
+    Python's own parse errors quote the offending text (``strptime`` puts the raw
+    timestamp in its message), and a traceback would print it. This error is raised
+    ``from None`` in its place, so no raw health value or timestamp reaches a terminal,
+    a log, or an AI reading the output.
+    """
 
 
 @dataclass(frozen=True)
@@ -153,11 +164,39 @@ def _workout_from_element(elem: ET.Element) -> Workout:
     )
 
 
-def iter_records(source, types: Iterable[str] | None = None) -> Iterator[Record]:
+def iter_records(
+    source,
+    types: Iterable[str] | None = None,
+    *,
+    on_skip: Callable[[str], None] | None = None,
+) -> Iterator[Record]:
+    """Yield a :class:`Record` for every ``<Record>`` of a wanted type in the export.
+
+    ``types`` restricts to those type identifiers (``None`` yields every record). With
+    a filter, a ``<Record>`` that has no ``type`` at all is simply not wanted, so it is
+    passed over like any other unwanted type.
+
+    Error handling (the skip-and-report contract; docs/architecture.md, issue #3):
+    - Without ``on_skip`` (strict), a record that fails to parse raises
+      :class:`MalformedRecordError`, aborting the import. Its message names only the
+      record type, and the original error is suppressed (``from None``), because that
+      error quotes the raw timestamp.
+    - With ``on_skip``, the bad record is skipped and ``on_skip`` is called with only
+      its type identifier, never its raw value or timestamp.
+    """
     wanted = set(types) if types is not None else None
     for elem in _iter_elements(source, "Record"):
-        if wanted is None or elem.attrib["type"] in wanted:
-            yield _record_from_element(elem)
+        record_type = elem.attrib.get("type")
+        if wanted is not None and record_type not in wanted:
+            continue
+        try:
+            record = _record_from_element(elem)
+        except (ValueError, KeyError):
+            if on_skip is None:
+                raise MalformedRecordError(f"malformed {record_type or 'untyped'} record") from None
+            on_skip(record_type or "")
+            continue
+        yield record
 
 
 def _record_from_element(elem: ET.Element) -> Record:

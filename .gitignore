@@ -29,3 +29,9 @@ xcuserdata/
 
 # Local IDE settings
 .vscode/
+
+# Claude Code: per-machine state, never committed. Subagent memory can quote what an
+# agent learned from real exports, so it stays local (same rule as the hydrex repos).
+# The rest of .claude/ stays visible, so a shared setting or agent can be committed.
+.claude/agent-memory/
+.claude/settings.local.json
