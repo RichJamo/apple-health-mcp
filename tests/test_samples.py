@@ -139,7 +139,10 @@ def test_reading_between_two_workouts_is_dropped_and_each_tagged_correctly():
 
 
 def test_nested_workout_does_not_hide_the_outer_workouts_readings():
-    """A short workout B inside a longer one A must not swallow A's later readings.
+    """A workout B lying inside a longer one A must not swallow A's later readings.
+
+    In real exports this is usually one session recorded twice (an app and the Watch,
+    seconds apart); the case is exaggerated here so each reading's fate is clear.
 
     The latest-starting window (B) misses 10:40 and 11:03, but A still holds them —
     the tail at 11:03 is exactly what recovery needs. A plain "latest start" lookup

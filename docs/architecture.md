@@ -126,9 +126,12 @@ not deferred to a later phase.
 `[start, end + 5 min]` window are stored (Rich's choice: smaller and more private than
 keeping every reading). Apple's `HeartRateRecoveryOneMinute` records go through the same
 window, which on the first real export kept every one of them. Workouts overlap in real
-exports (one session recorded by two apps, or a short workout inside a longer one), so a
-reading is kept if *any* window holds it; its `workout_id` names one such workout, and
-recovery analysis should select readings by time range rather than by `workout_id`.
+exports, mostly because one session is recorded twice by different sources: a surf
+tracking app or Strava, and the Watch's own workout, with start and end seconds apart.
+So a reading is kept if *any* window holds it; its `workout_id` names one such workout,
+and recovery analysis should select readings by time range rather than by `workout_id`.
+These double recordings also mean the `workouts` table holds some sessions twice — see
+"Source dedup" in §5.
 
 ### Malformed records (decided, issue #3)
 
@@ -162,6 +165,14 @@ never duplicates.
 **Source dedup (to decide against real data):** the same metric can appear from the
 Watch, the iPhone and third-party apps. Likely rule: prefer the Apple Watch source
 for workouts. Made explicit and documented rather than chosen silently.
+
+Seen in the first real export: at least 32 pairs of workouts whose start and end both
+fall within 3 minutes of each other, and every such pair comes from two different
+sources — mostly a surf-tracking app plus the Watch, a few Strava plus the Watch. Each
+is one session stored twice, because `workout_id` includes the source. Heart rate is
+unaffected (each reading is stored once), but session counts and weekly minutes would
+count these twice. Where to remove the duplicate — at import, or in analysis — is the
+open decision.
 
 ## 6. Privacy model
 

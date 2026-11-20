@@ -95,10 +95,11 @@ def _samples_in_windows(
     store only workout-adjacent heart rate (option 1), keeping the database small and
     private. ``windows`` must be sorted by start, as ``_windows_from_db`` returns them.
 
-    Windows do overlap in real exports: the same session recorded by two apps, or a
-    short workout logged inside a longer one. So the latest-starting window is tried
-    first, and if it does not reach the
-    reading, the window that reaches furthest among those started by then. Both
+    Windows do overlap in real exports, mostly because one session is recorded twice
+    by different sources (a third-party app and the Watch), with start and end a few
+    seconds apart, so one record sits just inside the other. So the latest-starting
+    window is tried first, and if it does not reach the reading, the window that
+    reaches furthest among those started by then. Both
     lookups are a binary search plus a precomputed list, so millions of readings stay
     fast.
 
