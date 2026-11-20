@@ -71,7 +71,7 @@ def _write_one_workout(path: Path, start: str, end: str) -> Path:
     return path
 
 
-# --- workouts (Rich's import_export) ------------------------------------------
+# --- workouts (import_export) -------------------------------------------------
 
 
 def test_import_reports_counts(tmp_path):

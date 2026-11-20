@@ -191,5 +191,6 @@ is lost.
 
 uv-managed (`pyproject.toml`, committed `uv.lock`). Core parser and storage use only
 Python's standard library (`xml`, `sqlite3`); the MCP SDK is the one substantial
-dependency, added in Phase 2. Tests: pytest. CI (GitHub Actions) runs the suite and
-blocks merge on failure.
+dependency, added in Phase 2. Tests: pytest. CI (GitHub Actions) runs ruff and the
+suite on Python 3.11 and 3.12 for every pull request, and branch protection on `main`
+makes a failure block the merge.

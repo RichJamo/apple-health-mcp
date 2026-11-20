@@ -10,8 +10,8 @@ readings inside each workout's window plus a recovery tail, so the database stay
 small and private). Malformed records are skipped and counted by default; ``--strict``
 aborts on the first one instead.
 
-``import_export`` (workouts) is Rich's; ``import_samples`` and the window-matching are
-the samples half.
+``import_export`` imports the workouts; ``import_samples`` and the window-matching
+import the heart-rate readings that belong to them.
 """
 
 from __future__ import annotations

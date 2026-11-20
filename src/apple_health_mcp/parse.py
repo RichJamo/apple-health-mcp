@@ -7,7 +7,7 @@ accumulated children) as we go. See ``docs/architecture.md`` for the data facts.
 
 Public API:
 - ``iter_workouts(source)``  -> yields :class:`Workout`
-- ``iter_records(source, types=None, *, on_skip=None)`` -> yields :class:`Record`   (Rich's task)
+- ``iter_records(source, types=None, *, on_skip=None)`` -> yields :class:`Record`
 - ``MalformedRecordError`` -> raised by ``iter_records`` in strict mode (no ``on_skip``)
 
 Both take ``source`` = a path (str or ``os.PathLike``) or an open binary file.

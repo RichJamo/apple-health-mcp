@@ -13,8 +13,8 @@ fields that identify the session), and the table's PRIMARY KEY plus
 Public API:
 - ``connect(path)``                 -> open a connection
 - ``init_schema(conn)``             -> create tables if absent
-- ``workout_id(workout)``           -> the stable hash id        (Rich's task)
-- ``upsert_workouts(conn, ws)``     -> insert new, skip seen; returns # inserted (Rich's task)
+- ``workout_id(workout)``           -> the stable hash id
+- ``upsert_workouts(conn, ws)``     -> insert new, skip seen; returns # inserted
 - ``upsert_samples(conn, samples)`` -> same, for time-series :class:`Sample` rows
 
 The samples half stores the heart-rate time-series that the training summary and
