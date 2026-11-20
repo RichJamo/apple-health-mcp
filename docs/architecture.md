@@ -122,6 +122,24 @@ Timing: the *capture* half rides along with `ingest` (the next build step); the 
 half lands with the first training summary in `analyze.py`. So it is part of milestone 1,
 not deferred to a later phase.
 
+**Capture is implemented** (`ingest.py`). Only heart-rate readings inside some workout's
+`[start, end + 5 min]` window are stored (Rich's choice: smaller and more private than
+keeping every reading). Apple's `HeartRateRecoveryOneMinute` records go through the same
+window, which on the first real export kept every one of them. Workouts overlap in real
+exports (one session recorded by two apps, or a short workout inside a longer one), so a
+reading is kept if *any* window holds it; its `workout_id` names one such workout, and
+recovery analysis should select readings by time range rather than by `workout_id`.
+
+### Malformed records (decided, issue #3)
+
+Ingest skips a record it cannot parse and counts it, so one bad row in years of data
+does not stop an import; the summary line reports how many were skipped. `--strict`
+aborts on the first one instead and exits with code 1. Either way the output names only
+the record type: Python's own parse errors quote the raw timestamp, so `iter_records`
+raises `MalformedRecordError` in their place (`from None`), and the skip callback is
+given the type alone. Workout parsing does not follow this contract yet: a malformed
+workout still raises Python's own error, which can quote raw text (tracked in #3).
+
 ## 5. Data model (SQLite)
 
 Four tables keep raw-ish records separate from derived summaries and keep subjective
