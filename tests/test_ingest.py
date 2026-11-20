@@ -59,6 +59,18 @@ def _write_window_export(tmp_path: Path) -> Path:
     return path
 
 
+def _write_one_workout(path: Path, start: str, end: str) -> Path:
+    """A minimal export holding one 30-minute run with the given start and end text."""
+    path.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n<HealthData>'
+        '<Workout workoutActivityType="HKWorkoutActivityTypeRunning" duration="30" '
+        f'durationUnit="min" sourceName="Test Watch" startDate="{start}" endDate="{end}"/>'
+        "</HealthData>",
+        encoding="utf-8",
+    )
+    return path
+
+
 # --- workouts (Rich's import_export) ------------------------------------------
 
 
@@ -91,6 +103,21 @@ def test_import_is_idempotent(tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM workouts").fetchone()[0] == 3
     finally:
         conn.close()
+
+
+def test_same_workout_written_with_a_different_offset_is_stored_once(tmp_path):
+    """A later export that writes the same session with a different UTC offset adds
+    nothing: 10:00 +0200 and 08:00 +0000 are the same moment, so the same id (#6)."""
+    db = tmp_path / "health.sqlite"
+    first = _write_one_workout(
+        tmp_path / "first.xml", "2026-03-01 10:00:00 +0200", "2026-03-01 10:30:00 +0200"
+    )
+    later = _write_one_workout(
+        tmp_path / "later.xml", "2026-03-01 08:00:00 +0000", "2026-03-01 08:30:00 +0000"
+    )
+
+    assert import_export(first, db) == (1, 1)
+    assert import_export(later, db) == (0, 1)  # recognised, not stored again
 
 
 # --- samples on the shared fixture --------------------------------------------

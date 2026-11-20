@@ -148,8 +148,14 @@ def workout_id(workout: Workout) -> str:
     - **Deterministic:** the same workout always yields the same id, across runs and
       across exports — so re-importing is a no-op at the primary key.
     - **Distinguishing:** two genuinely different sessions yield different ids.
+
+    Start and end are taken in UTC, so the same session written with a different
+    offset in a later export (``+02:00`` once, ``+00:00`` the next time) keeps its id
+    instead of being stored twice (issue #6).
     """
-    key = f"{workout.activity_type}|{workout.start.isoformat()}|{workout.end.isoformat()}|{workout.source_name}"
+    start = workout.start.astimezone(UTC).isoformat()
+    end = workout.end.astimezone(UTC).isoformat()
+    key = f"{workout.activity_type}|{start}|{end}|{workout.source_name}"
     return hashlib.sha256(key.encode()).hexdigest()
 
 
