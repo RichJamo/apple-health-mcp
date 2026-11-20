@@ -1,0 +1,48 @@
+# CI: the test suite is the spec (see CLAUDE.md), so every pull request and every
+# push to main runs the format check, the linter and the tests. Branch protection on
+# main requires both jobs to pass, so a red suite blocks the merge.
+#
+# Tests use synthetic fixtures only; no real health data exists in the repo or here.
+# Actions are pinned to a full commit, with the version in a comment, so a moved tag
+# cannot change what runs.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    # 3.11 is the floor in pyproject.toml; 3.12 is what development runs on.
+    name: tests and lint (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.6" # same uv as local development
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+
+      - name: Install the locked environment
+        run: uv sync --locked
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Run the tests
+        run: uv run pytest -q
