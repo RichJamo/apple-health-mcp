@@ -1,7 +1,7 @@
 """Tests for the streaming workout parser.
 
 These run against the synthetic fixture (tests/fixtures/sample_export.xml) — never
-real health data. The Record tests are Rich's to add alongside iter_records.
+real health data.
 """
 
 from datetime import datetime, timedelta, timezone

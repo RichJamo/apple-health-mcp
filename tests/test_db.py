@@ -1,11 +1,7 @@
 """Tests for the SQLite storage layer (db.py).
 
 These run against the synthetic fixture (tests/fixtures/sample_export.xml) — never
-real health data. They are the spec for Rich's two functions: get these green and
-the storage layer does its one job.
-
-Until workout_id and upsert_workouts are implemented they raise NotImplementedError,
-so these tests are expected to be RED first and go green when the functions are written.
+real health data.
 """
 
 from pathlib import Path
