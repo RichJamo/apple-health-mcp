@@ -25,6 +25,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from apple_health_mcp.db import (
+    OutdatedSchemaError,
     Sample,
     connect,
     init_schema,
@@ -134,6 +135,7 @@ def _samples_in_windows(
                 unit=record.unit,
                 source_name=record.source_name,
                 workout_id=workout_id,
+                end=record.end,
             )
 
 
@@ -210,7 +212,16 @@ def main(argv: list[str] | None = None) -> int:
     # The database lives in a gitignored data/ dir; create it on first run.
     args.db.parent.mkdir(parents=True, exist_ok=True)
 
-    w_inserted, w_seen = import_export(args.export, args.db)
+    try:
+        w_inserted, w_seen = import_export(args.export, args.db)
+    except OutdatedSchemaError as err:
+        print(
+            f"aborted: {args.db} was built by an older version of this tool "
+            f"(schema {err.found}, this version needs {err.expected}). "
+            "Delete it and run the import again; it is rebuilt from the export.",
+            file=sys.stderr,
+        )
+        return 1
     print(f"imported {w_inserted} new of {w_seen} workouts into {args.db}")
 
     try:

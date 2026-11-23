@@ -12,7 +12,8 @@ fields that identify the session), and the table's PRIMARY KEY plus
 
 Public API:
 - ``connect(path)``                 -> open a connection
-- ``init_schema(conn)``             -> create tables if absent
+- ``init_schema(conn)``             -> create tables if absent; refuses an outdated
+  database with ``OutdatedSchemaError`` (see ``SCHEMA_VERSION``)
 - ``workout_id(workout)``           -> the stable hash id
 - ``upsert_workouts(conn, ws)``     -> insert new, skip seen; returns # inserted
 - ``upsert_samples(conn, samples)`` -> same, for time-series :class:`Sample` rows
@@ -28,11 +29,33 @@ import hashlib
 import json
 import sqlite3
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from os import PathLike
 
 from apple_health_mcp.parse import Workout
+
+# The schema this code writes, recorded in SQLite's ``user_version``. Bump it whenever
+# a table changes shape; a database built at another version is refused, not patched.
+SCHEMA_VERSION = 1
+
+
+class OutdatedSchemaError(Exception):
+    """The database was built at a different schema version than this code writes.
+
+    Its tables may lack columns this code inserts, which would otherwise fail later
+    with an obscure SQL error. Everything in the database is derived from the export,
+    so the remedy is to delete the database file and import again.
+    """
+
+    def __init__(self, found: int, expected: int) -> None:
+        super().__init__(
+            f"database schema is version {found}, but this code needs version {expected}; "
+            "it is rebuilt from the export, so delete the database file and import again"
+        )
+        self.found = found
+        self.expected = expected
+
 
 # One place to name the columns, so the CREATE TABLE and the INSERT can never
 # drift apart. ``id`` is first and is the PRIMARY KEY.
@@ -55,6 +78,7 @@ _SAMPLE_COLUMNS = (
     "id",
     "type",
     "start_utc",
+    "end_utc",
     "value",
     "unit",
     "source_name",
@@ -83,8 +107,21 @@ def init_schema(conn: sqlite3.Connection) -> None:
     ``(type, start_utc)`` because queries always ask for one kind of reading over a
     time range. ``workout_id`` is nullable and declared ``REFERENCES workouts(id)``,
     which documents the link; SQLite enforces it only when ``PRAGMA foreign_keys`` is
-    on, and this module does not turn it on.
+    on, and this module does not turn it on. ``end_utc`` equals ``start_utc`` for an
+    instant reading; for a span (Apple stores some heart rate as one value covering
+    several minutes) it is when the span ends.
+
+    The database records ``SCHEMA_VERSION``. If the tables already exist at another
+    version, this raises :class:`OutdatedSchemaError` instead of writing to them.
     """
+    found = conn.execute("PRAGMA user_version").fetchone()[0]
+    has_tables = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master"
+        " WHERE type = 'table' AND name IN ('workouts', 'samples')"
+    ).fetchone()[0]
+    if has_tables and found != SCHEMA_VERSION:
+        raise OutdatedSchemaError(found, SCHEMA_VERSION)
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS workouts (
@@ -106,6 +143,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             id           TEXT PRIMARY KEY,
             type         TEXT NOT NULL,
             start_utc    TEXT NOT NULL,
+            end_utc      TEXT NOT NULL,
             value        TEXT,
             unit         TEXT,
             source_name  TEXT NOT NULL,
@@ -114,6 +152,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS samples_type_start ON samples (type, start_utc)")
+    # PRAGMA takes no ? placeholder; SCHEMA_VERSION is our own integer constant.
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
 
 
@@ -190,7 +230,11 @@ class Sample:
     plus the id of the workout whose window it falls in.
 
     Invariants:
-    - ``start`` is a timezone-aware datetime (stored as UTC, like a workout's).
+    - ``start`` and ``end`` are timezone-aware datetimes (stored as UTC, like a
+      workout's), with ``end >= start``.
+    - ``end`` is never ``None`` once built: left out, it defaults to ``start``, which
+      is what an instant reading is. A span — one value Apple stores for several
+      minutes — has a later ``end``.
     - ``value`` and ``unit`` may be ``None`` (the export marks them optional).
     - ``workout_id`` is the owning workout's id, or ``None`` if unlinked.
     """
@@ -201,31 +245,39 @@ class Sample:
     unit: str | None
     source_name: str
     workout_id: str | None
+    end: datetime | None = field(default=None)
+
+    def __post_init__(self) -> None:
+        if self.end is None:
+            object.__setattr__(self, "end", self.start)  # frozen: set once, here
 
 
 def sample_id(sample: Sample) -> str:
     """Return a stable, deterministic id for ``sample`` (same idea as ``workout_id``).
 
-    Keyed on what identifies a reading — its type, instant, value and source — so
-    re-importing the same export is a no-op at the primary key. The instant is taken
-    in UTC, so the same moment written with a different offset (``+02:00`` in one
-    export, ``+00:00`` in another) still gets the same id and is stored once. The
-    ``workout_id`` link is derived, not part of identity, so it is left out of the key.
+    Keyed on what identifies a reading — its type, start and end, value and source —
+    so re-importing the same export is a no-op at the primary key. Times are taken in
+    UTC, so the same moment written with a different offset (``+02:00`` in one export,
+    ``+00:00`` in another) still gets the same id and is stored once. The end is part
+    of the key so that a span and an instant reading that start together stay two
+    readings. The ``workout_id`` link is derived, not part of identity.
     """
-    instant = sample.start.astimezone(UTC).isoformat()
-    key = f"{sample.type}|{instant}|{sample.value}|{sample.source_name}"
+    start = sample.start.astimezone(UTC).isoformat()
+    end = sample.end.astimezone(UTC).isoformat()
+    key = f"{sample.type}|{start}|{end}|{sample.value}|{sample.source_name}"
     return hashlib.sha256(key.encode()).hexdigest()
 
 
 def _sample_row_values(sample: Sample) -> tuple:
     """The column values for one sample, in ``_SAMPLE_COLUMNS`` order.
 
-    Stores ``start`` as a UTC ISO string, matching how workouts store their times.
+    Stores ``start`` and ``end`` as UTC ISO strings, matching how workouts store them.
     """
     return (
         sample_id(sample),
         sample.type,
         sample.start.astimezone(UTC).isoformat(),
+        sample.end.astimezone(UTC).isoformat(),
         sample.value,
         sample.unit,
         sample.source_name,
