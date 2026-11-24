@@ -20,14 +20,16 @@ import pytest
 
 from apple_health_mcp.db import (
     SCHEMA_VERSION,
-    OutdatedSchemaError,
     Sample,
+    SchemaVersionError,
     connect,
     init_schema,
     sample_id,
     upsert_samples,
+    workout_id,
 )
 from apple_health_mcp.ingest import HEART_RATE, import_export, import_samples, main
+from apple_health_mcp.parse import Workout
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_export.xml"
 SAST = timezone(timedelta(hours=2))  # +0200, so a missed UTC conversion shows
@@ -56,6 +58,11 @@ def _sample(start: datetime, end: datetime | None = None) -> Sample:
 
 def _user_version(conn: sqlite3.Connection) -> int:
     return conn.execute("PRAGMA user_version").fetchone()[0]
+
+
+def _schema(conn: sqlite3.Connection) -> list[tuple]:
+    """Every table and index with the SQL that made it, to compare before and after."""
+    return conn.execute("SELECT type, name, sql FROM sqlite_master ORDER BY name").fetchall()
 
 
 def _sample_columns(conn: sqlite3.Connection) -> list[str]:
@@ -174,21 +181,24 @@ def test_repeat_init_is_safe_and_keeps_the_data(conn):
 
 @pytest.mark.parametrize("found", [0, SCHEMA_VERSION + 1], ids=["older", "newer"])
 def test_database_at_another_version_is_refused_untouched(found):
-    """Tables built at any other version raise OutdatedSchemaError carrying both
-    versions, and init_schema writes nothing first: the stamp is not overwritten and
-    no table is altered. Version 0 is the real case, a database from before the stamp.
+    """Tables built at any other version raise SchemaVersionError carrying both
+    versions, and init_schema writes nothing first: the stamp is not overwritten, and
+    no table, column or index is created or altered (the whole schema is compared
+    before and after). Version 0 is the real case, a database from before the stamp.
     """
     old = connect(":memory:")
     try:
         _build_unversioned_db(old)
         old.execute(f"PRAGMA user_version = {found}")  # an int from this test, not input
+        schema_before = _schema(old)
 
-        with pytest.raises(OutdatedSchemaError) as caught:
+        with pytest.raises(SchemaVersionError) as caught:
             init_schema(old)
 
         assert (caught.value.found, caught.value.expected) == (found, SCHEMA_VERSION)
         assert _user_version(old) == found  # not re-stamped
-        assert "end_utc" not in _sample_columns(old)  # not altered
+        assert _schema(old) == schema_before  # nothing created or altered
+        assert "end_utc" not in _sample_columns(old)
     finally:
         old.close()
 
@@ -211,3 +221,39 @@ def test_cli_exits_1_with_a_rebuild_message_on_an_old_database(tmp_path, capsys)
     assert "Delete it and run the import again" in captured.err
     assert f"this version needs {SCHEMA_VERSION}" in captured.err
     assert captured.out == ""  # no "imported ..." line
+
+
+def test_ids_are_pinned_to_the_schema_version():
+    """Golden ids: two fixed synthetic readings must hash to these exact values.
+
+    If this fails, ``sample_id`` or ``workout_id`` now computes its key differently.
+    Every stored row would get a new id, and a re-import into an existing database
+    would store it again without any error. So bump SCHEMA_VERSION (an existing
+    database is then refused and rebuilt), and update both the version and the ids
+    below in the same commit.
+    """
+    start = datetime(2026, 3, 1, 8, 0, tzinfo=UTC)
+    span = Sample(
+        type=HEART_RATE,
+        start=start,
+        value="150",
+        unit="count/min",
+        source_name="Test Watch",
+        workout_id=None,
+        end=datetime(2026, 3, 1, 8, 14, tzinfo=UTC),
+    )
+    run = Workout(
+        activity_type="HKWorkoutActivityTypeRunning",
+        start=start,
+        end=datetime(2026, 3, 1, 8, 30, tzinfo=UTC),
+        duration_s=1800.0,
+        active_energy_kcal=None,
+        source_name="Test Watch",
+        metadata={},
+    )
+
+    assert (SCHEMA_VERSION, sample_id(span), workout_id(run)) == (
+        1,
+        "be1af874e08737fe00bf2019202e242b061a1352990106696a76c3552c25dee3",
+        "dc3af6136b4c5cc026e41b995f2f55b5cd4ed3a90857e52e2555216ab6537fe5",
+    )

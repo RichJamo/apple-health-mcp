@@ -25,8 +25,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from apple_health_mcp.db import (
-    OutdatedSchemaError,
     Sample,
+    SchemaVersionError,
     connect,
     init_schema,
     upsert_samples,
@@ -214,9 +214,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         w_inserted, w_seen = import_export(args.export, args.db)
-    except OutdatedSchemaError as err:
+    except SchemaVersionError as err:
         print(
-            f"aborted: {args.db} was built by an older version of this tool "
+            f"aborted: {args.db} was built by a different version of this tool "
             f"(schema {err.found}, this version needs {err.expected}). "
             "Delete it and run the import again; it is rebuilt from the export.",
             file=sys.stderr,

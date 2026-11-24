@@ -13,7 +13,7 @@ fields that identify the session), and the table's PRIMARY KEY plus
 Public API:
 - ``connect(path)``                 -> open a connection
 - ``init_schema(conn)``             -> create tables if absent; refuses an outdated
-  database with ``OutdatedSchemaError`` (see ``SCHEMA_VERSION``)
+  database with ``SchemaVersionError`` (see ``SCHEMA_VERSION``)
 - ``workout_id(workout)``           -> the stable hash id
 - ``upsert_workouts(conn, ws)``     -> insert new, skip seen; returns # inserted
 - ``upsert_samples(conn, samples)`` -> same, for time-series :class:`Sample` rows
@@ -36,11 +36,14 @@ from os import PathLike
 from apple_health_mcp.parse import Workout
 
 # The schema this code writes, recorded in SQLite's ``user_version``. Bump it whenever
-# a table changes shape; a database built at another version is refused, not patched.
+# a table changes shape, or whenever ``workout_id`` or ``sample_id`` computes its key
+# differently: new ids would make a re-import store every row a second time, with no
+# error. A database built at another version is refused, not patched. The golden-id
+# test in tests/test_schema.py fails when a key changes, as the reminder to bump this.
 SCHEMA_VERSION = 1
 
 
-class OutdatedSchemaError(Exception):
+class SchemaVersionError(Exception):
     """The database was built at a different schema version than this code writes.
 
     Its tables may lack columns this code inserts, which would otherwise fail later
@@ -112,7 +115,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     several minutes) it is when the span ends.
 
     The database records ``SCHEMA_VERSION``. If the tables already exist at another
-    version, this raises :class:`OutdatedSchemaError` instead of writing to them.
+    version, this raises :class:`SchemaVersionError` instead of writing to them.
     """
     found = conn.execute("PRAGMA user_version").fetchone()[0]
     has_tables = conn.execute(
@@ -120,7 +123,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
         " WHERE type = 'table' AND name IN ('workouts', 'samples')"
     ).fetchone()[0]
     if has_tables and found != SCHEMA_VERSION:
-        raise OutdatedSchemaError(found, SCHEMA_VERSION)
+        raise SchemaVersionError(found, SCHEMA_VERSION)
 
     conn.execute(
         """
@@ -231,7 +234,8 @@ class Sample:
 
     Invariants:
     - ``start`` and ``end`` are timezone-aware datetimes (stored as UTC, like a
-      workout's), with ``end >= start``.
+      workout's). ``end`` is expected to be at or after ``start``, as Apple writes
+      them; this is not checked.
     - ``end`` is never ``None`` once built: left out, it defaults to ``start``, which
       is what an instant reading is. A span — one value Apple stores for several
       minutes — has a later ``end``.
