@@ -403,9 +403,11 @@ def test_readings_around_takes_its_bounds_in_utc_whatever_the_workouts_offset(tm
         conn.close()
 
 
-def test_a_non_numeric_stored_value_raises_without_quoting_it(tmp_path):
-    """A value that is not a number stops the read with MalformedRecordError, whose
-    rendered traceback names the type but not the raw value Python's error would quote."""
+@pytest.mark.parametrize("raw", ["72,5", "NaN", "inf"])
+def test_a_non_numeric_stored_value_raises_without_quoting_it(tmp_path, raw):
+    """A value that is not a finite number stops the read with MalformedRecordError.
+    Its rendered traceback names the type but not the raw value, and no other error is
+    attached to it. "NaN" and "inf" parse as floats, but would read as real figures."""
     conn, first = _first_workout_and_db(tmp_path)
     try:
         upsert_samples(
@@ -414,7 +416,7 @@ def test_a_non_numeric_stored_value_raises_without_quoting_it(tmp_path):
                 Sample(
                     type=HEART_RATE,
                     start=first.start + timedelta(minutes=5),
-                    value="72,5",
+                    value=raw,
                     unit="count/min",
                     source_name="Test Watch",
                     workout_id=first.id,
@@ -428,4 +430,5 @@ def test_a_non_numeric_stored_value_raises_without_quoting_it(tmp_path):
 
     rendered = "".join(traceback.format_exception(caught.value))
     assert HEART_RATE in rendered
-    assert "72,5" not in rendered
+    assert raw not in rendered
+    assert caught.value.__context__ is None  # Python's own error, quoting it, is not kept

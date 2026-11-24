@@ -213,7 +213,7 @@ def test_postconditions_hold_on_random_overlapping_records():
                 _w(
                     f"{trial}-{n}",
                     start,
-                    start + rng.randrange(0, 60),
+                    start + rng.randrange(-10, 60),  # some reversed, some zero-length
                     rng.choice([WATCH, SURF_APP, RUN_APP]),
                 )
             )

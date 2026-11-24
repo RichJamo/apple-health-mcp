@@ -12,8 +12,8 @@ fields that identify the session), and the table's PRIMARY KEY plus
 
 Public API:
 - ``connect(path)``                 -> open a connection
-- ``init_schema(conn)``             -> create tables if absent; refuses an outdated
-  database with ``SchemaVersionError`` (see ``SCHEMA_VERSION``)
+- ``init_schema(conn)``             -> create tables if absent; refuses a database
+  built at another version with ``SchemaVersionError`` (see ``SCHEMA_VERSION``)
 - ``workout_id(workout)``           -> the stable hash id
 - ``upsert_workouts(conn, ws)``     -> insert new, skip seen; returns # inserted
 - ``upsert_samples(conn, samples)`` -> same, for time-series :class:`Sample` rows
@@ -49,6 +49,11 @@ class SchemaVersionError(Exception):
     Its tables may lack columns this code inserts, which would otherwise fail later
     with an obscure SQL error. Everything in the database is derived from the export,
     so the remedy is to delete the database file and import again.
+
+    That remedy holds only while every table is rebuilt from the export. A table of
+    data entered by hand (the planned ``workout_feedback``) would be lost by it, so
+    adding one needs a real migration first; a test in tests/test_schema.py fails when
+    a table outside the derived set appears, as the reminder.
     """
 
     def __init__(self, found: int, expected: int) -> None:

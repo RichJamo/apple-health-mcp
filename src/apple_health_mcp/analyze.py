@@ -23,6 +23,7 @@ Read-only: nothing here writes to the database.
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -221,8 +222,9 @@ def readings_around(conn: sqlite3.Connection, workout: StoredWorkout) -> list[Re
     offset ``workout``'s times carry.
 
     Raises :class:`~apple_health_mcp.parse.MalformedRecordError` if a stored value is
-    not a number. Its message names only the reading's type: Python's own error would
-    quote the raw value.
+    not a finite number ("NaN" and "inf" parse as floats but would read as real
+    figures). Its message names only the reading's type, and no other error is attached
+    to it: Python's own error would quote the raw value.
     """
     rows = conn.execute(
         "SELECT type, start_utc, end_utc, value FROM samples"
@@ -247,11 +249,20 @@ def readings_around(conn: sqlite3.Connection, workout: StoredWorkout) -> list[Re
 
 
 def _stored_bpm(kind: str, value: str) -> float:
-    """``float(value)``, with an error that does not quote the value if it fails."""
+    """``float(value)`` if it is a finite number; otherwise an error that does not
+    quote the value.
+
+    The error is raised after the ``except`` block has finished, so Python's own
+    ValueError (which quotes the value) is not attached as its ``__context__`` either,
+    for anything that walks the chain without honouring ``from None``.
+    """
     try:
-        return float(value)
+        bpm = float(value)
     except ValueError:
-        raise MalformedRecordError(f"non-numeric {kind} value in the database") from None
+        bpm = math.nan  # handled below, outside the except block
+    if not math.isfinite(bpm):
+        raise MalformedRecordError(f"non-numeric {kind} value in the database")
+    return bpm
 
 
 @dataclass(frozen=True)

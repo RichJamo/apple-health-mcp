@@ -254,8 +254,36 @@ def test_ids_are_pinned_to_the_schema_version():
         metadata={},
     )
 
-    assert (SCHEMA_VERSION, sample_id(span), workout_id(run)) == (
+    no_value = Sample(  # the export marks value optional; its key must stay stable too
+        type=HEART_RATE,
+        start=start,
+        value=None,
+        unit=None,
+        source_name="Test Watch",
+        workout_id=None,
+    )
+
+    assert (SCHEMA_VERSION, sample_id(span), sample_id(no_value), workout_id(run)) == (
         2,  # bumped for the heart-rate columns; the id keys did not change
         "be1af874e08737fe00bf2019202e242b061a1352990106696a76c3552c25dee3",
+        "ae4d2310b863aa42213a57cf7ff185316a9eb09d6800986b4513ceb95a29b871",
         "dc3af6136b4c5cc026e41b995f2f55b5cd4ed3a90857e52e2555216ab6537fe5",
     )
+
+
+def test_every_table_is_derived_from_the_export():
+    """A tripwire, not a behaviour test. SchemaVersionError tells the user to delete
+    the database and import again, which is safe only while every table is rebuilt
+    from the export. If this fails, a table was added: if it holds data entered by
+    hand (such as the planned workout_feedback), write a migration that keeps it
+    before allowing the table here, because the rebuild remedy would erase it."""
+    fresh = connect(":memory:")
+    try:
+        init_schema(fresh)
+        tables = {
+            name for (name,) in fresh.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    finally:
+        fresh.close()
+
+    assert tables == {"workouts", "samples"}
