@@ -78,9 +78,15 @@ data-free schema):
    carry no `totalEnergyBurned` attribute; active energy is in
    `WorkoutStatistics[type=ActiveEnergyBurned].sum`. The parser reads it there, with
    the attribute as fallback only.
-2. **Per-workout heart rate is often absent as a statistic.** When a workout has no
-   `WorkoutStatistics` for heart rate, average/max are **computed from the
-   `HeartRate` records whose timestamp falls in the workout's [start, end] window.**
+2. **Per-workout heart rate: Apple's statistic first; the readings hide the peak.**
+   Apple's `WorkoutStatistics` of type `HeartRate` (average, maximum) exists only on
+   workouts from late 2022 on, about half the sessions. Inside a workout Apple mostly
+   stores heart rate as *spans*: one value covering several minutes, which is the
+   average over that stretch (a span-weighted mean matches Apple's average to within
+   about 1 bpm). So average heart rate falls back to that weighted mean when the
+   statistic is absent, but peak heart rate comes **only** from the statistic: the
+   highest span reads well below Apple's maximum. The parser stores average and
+   maximum on the workout (schema version 2).
 3. **Timestamps carry their UTC offset** (e.g. `+0200`) plus an `HKTimeZone`
    metadata entry. Store UTC and the original zone; never discard the offset.
 4. **Apple duplicates some `MetadataEntry` lines.** De-dupe by key.
@@ -101,11 +107,16 @@ designed to preserve it from the start, even though the recovery *number* is com
 later. Two independent sources:
 
 - **Apple's own figure:** 232 `HeartRateRecoveryOneMinute` records (2022+, the
-  watchOS 9 feature — verified: none before 2022). Ingest these as an ordinary metric;
-  they give Apple's one-minute recovery for the workouts that have it, as a cross-check.
-- **Computed from samples:** the Watch keeps logging heart rate in the background after
-  a workout ends, so recovery can be computed from the `HeartRate` records in the window
-  *after* `endDate` (e.g. HR at end vs. one and two minutes later) — no cooldown needed.
+  watchOS 9 feature — verified: none before 2022), each about three minutes after a
+  workout ends. Their metadata marks them as predictions from a submaximal test, not
+  measurements, so analysis reports them labelled as an estimate, never as ground truth.
+- **Measured from samples:** the Watch keeps logging instant heart-rate readings in the
+  background after a workout ends. "Heart rate at the end" is usually not measurable,
+  because the last minutes inside the workout are a span. So measured recovery is
+  Apple's maximum minus the instant reading nearest one minute after the end (within
+  15 s either side). It exists for about half the sessions, those with Apple's maximum.
+  If a workout is ended a while after the effort stopped, heart rate was already
+  falling, so the figure covers more than a minute of recovery and reads high.
 
 Two design consequences, to honour when we build ingest and analyze:
 
@@ -114,7 +125,7 @@ Two design consequences, to honour when we build ingest and analyze:
    not just `[start, end]`, or the very samples recovery needs get dropped. Also import
    the `HeartRateRecoveryOneMinute` records.
 2. **Recovery is derived, not stored raw.** It is computed in `analyze.py`
-   (`heart_rate_recovery(workout)`) from samples already in the DB. The four-table model
+   (`heart_rate_summary(workout, readings)`) from samples already in the DB. The four-table model
    needs no new column now; if we later cache the figure, it belongs in a derived
    `workout_metrics` table, never mixed into raw `samples`.
 

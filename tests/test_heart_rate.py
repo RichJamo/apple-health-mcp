@@ -1,4 +1,5 @@
-"""Tests for per-workout heart rate: Apple's own statistic is parsed and stored.
+"""Tests for per-workout heart rate: Apple's statistic is parsed and stored, and
+analyze.heart_rate_summary turns it and the stored readings into one summary.
 
 Apple writes a ``WorkoutStatistics`` child of type HeartRate with the workout's
 average and maximum. Spans in the stored readings are averages and hide the peak,
@@ -7,11 +8,22 @@ so this statistic is the only accurate peak; it is kept on the workout row.
 Synthetic data only, never real health data.
 """
 
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 
+import pytest
+
+from apple_health_mcp.analyze import (
+    HeartRateSummary,
+    Reading,
+    StoredWorkout,
+    heart_rate_summary,
+    load_workouts,
+    readings_around,
+)
 from apple_health_mcp.db import connect
-from apple_health_mcp.ingest import import_export
+from apple_health_mcp.ingest import HEART_RATE, HEART_RATE_RECOVERY, import_export, import_samples
 from apple_health_mcp.parse import iter_workouts
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_export.xml"
@@ -80,3 +92,210 @@ def test_heart_rate_statistic_is_stored_and_absent_ones_are_null(tmp_path):
         "HighIntensityIntervalTraining": (140.0, 175.0),
         "Yoga": (None, None),
     }
+
+
+# --- the per-session summary (analyze.heart_rate_summary) ----------------------------
+#
+# Times are minutes or seconds from a fixed workout: 10:00 to 10:30 UTC. Readings are
+# built directly, so each test shows exactly what the summary is given.
+
+_START = datetime(2026, 3, 1, 10, 0, tzinfo=UTC)
+_END = _START + timedelta(minutes=30)
+
+
+def _workout(average: float | None = None, maximum: float | None = None) -> StoredWorkout:
+    return StoredWorkout(
+        id="W1",
+        activity_type="HKWorkoutActivityTypeSurfingSports",
+        start=_START,
+        end=_END,
+        duration_s=1800.0,
+        active_energy_kcal=None,
+        heart_rate_average_bpm=average,
+        heart_rate_maximum_bpm=maximum,
+        source_name="Test Watch",
+        tz="Africa/Johannesburg",
+    )
+
+
+def _instant(at: datetime, bpm: float, kind: str = HEART_RATE) -> Reading:
+    return Reading(type=kind, start=at, end=at, bpm=bpm)
+
+
+def _span(start: datetime, end: datetime, bpm: float) -> Reading:
+    return Reading(type=HEART_RATE, start=start, end=end, bpm=bpm)
+
+
+def _minute(n: float) -> datetime:
+    return _START + timedelta(minutes=n)
+
+
+def _after_end(seconds: float) -> datetime:
+    return _END + timedelta(seconds=seconds)
+
+
+def test_average_and_peak_are_apples_when_the_statistic_exists():
+    """With Apple's statistic present, average and peak are Apple's figures, even
+    though the readings would give other numbers."""
+    readings = [_span(_minute(0), _minute(30), 120.0), _instant(_minute(10), 190.0)]
+
+    summary = heart_rate_summary(_workout(average=140.0, maximum=175.0), readings)
+
+    assert (summary.average_bpm, summary.peak_bpm) == (140.0, 175.0)
+
+
+def test_without_the_statistic_average_is_the_time_weighted_mean_of_spans():
+    """Spans are weighted by the time they cover inside the workout: 0-10 at 100 bpm
+    and 10-40 at 140 bpm, of which only 10-30 is inside, give (100*10 + 140*20) / 30.
+    An instant reading is ignored when spans exist, because spans cover the time."""
+    readings = [
+        _span(_minute(0), _minute(10), 100.0),
+        _span(_minute(10), _minute(40), 140.0),
+        _instant(_minute(5), 200.0),
+    ]
+
+    summary = heart_rate_summary(_workout(), readings)
+
+    assert summary.average_bpm == pytest.approx((100 * 10 + 140 * 20) / 30)
+
+
+def test_without_the_statistic_or_spans_average_is_the_mean_of_instants_inside():
+    """Only instants inside [start, end] count: the one 2 minutes after the end is
+    recovery, not workout."""
+    readings = [
+        _instant(_minute(5), 120.0),
+        _instant(_minute(25), 160.0),
+        _instant(_after_end(120), 100.0),
+    ]
+
+    assert heart_rate_summary(_workout(), readings).average_bpm == 140.0
+
+
+def test_without_the_statistic_there_is_no_peak_and_no_measured_recovery():
+    """Spans are averages that hide the peak, so the readings never stand in for
+    Apple's maximum: with no statistic, peak and measured recovery are both absent,
+    even with a reading one minute after the end."""
+    readings = [_span(_minute(0), _minute(30), 150.0), _instant(_after_end(60), 120.0)]
+
+    summary = heart_rate_summary(_workout(), readings)
+
+    assert summary.peak_bpm is None
+    assert summary.measured_recovery_bpm is None
+
+
+def test_measured_recovery_uses_the_instant_nearest_one_minute_after_the_end():
+    """Peak 170. Of the instants 45-75 s after the end, the one at +62 s is nearest
+    to +60 s, so recovery is 170 - 140 = 30. A span starting at exactly +60 s is not
+    an instant reading and is ignored; +80 s is outside the window."""
+    readings = [
+        _instant(_after_end(50), 150.0),
+        _instant(_after_end(62), 140.0),
+        _span(_after_end(60), _after_end(600), 110.0),
+        _instant(_after_end(80), 120.0),
+    ]
+
+    summary = heart_rate_summary(_workout(average=140.0, maximum=170.0), readings)
+
+    assert summary.measured_recovery_bpm == 30.0
+
+
+@pytest.mark.parametrize(
+    ("offsets", "expected"),
+    [
+        ([45], 170.0 - 145),  # the window's start is inclusive
+        ([75], 170.0 - 175),  # and so is its end (a reading above the peak is kept as is)
+        ([44, 76], None),  # just outside on both sides: nothing to measure
+        ([55, 65], 170.0 - 155),  # equally near +60 s: the earlier reading wins
+    ],
+    ids=["at 45 s", "at 75 s", "outside 45-75 s", "tie goes to the earlier"],
+)
+def test_the_one_minute_window_bounds_and_tie(offsets, expected):
+    """Each instant's bpm is 100 + its offset in seconds, so the result names which
+    reading was used."""
+    readings = [_instant(_after_end(s), 100.0 + s) for s in offsets]
+
+    summary = heart_rate_summary(_workout(average=140.0, maximum=170.0), readings)
+
+    assert summary.measured_recovery_bpm == expected
+
+
+def test_apples_recovery_figure_is_reported_as_an_estimate():
+    """Apple's one-minute recovery record in the 5-minute tail is reported in its
+    own field, apart from the measured figure. One before the end is not this
+    workout's, so with none in the tail the field is absent."""
+    tail = [_instant(_after_end(178), 25.0, kind=HEART_RATE_RECOVERY)]
+    before_end = [_instant(_minute(29), 25.0, kind=HEART_RATE_RECOVERY)]
+
+    assert heart_rate_summary(_workout(), tail).apple_recovery_estimate_bpm == 25.0
+    assert heart_rate_summary(_workout(), before_end).apple_recovery_estimate_bpm is None
+
+
+def test_with_two_apple_recovery_records_in_the_tail_the_earliest_is_used():
+    """If Apple wrote two recovery records after one workout, the first one, given
+    here second, is the one reported."""
+    records = [
+        _instant(_after_end(240), 30.0, kind=HEART_RATE_RECOVERY),
+        _instant(_after_end(178), 25.0, kind=HEART_RATE_RECOVERY),
+    ]
+
+    assert heart_rate_summary(_workout(), records).apple_recovery_estimate_bpm == 25.0
+
+
+def test_with_no_readings_and_no_statistic_everything_is_absent():
+    """Nothing to go on gives None in every field, never 0, which would read as a
+    real heart rate of zero."""
+    summary = heart_rate_summary(_workout(), [])
+
+    assert summary == HeartRateSummary(
+        average_bpm=None,
+        peak_bpm=None,
+        measured_recovery_bpm=None,
+        apple_recovery_estimate_bpm=None,
+    )
+
+
+def test_readings_around_loads_the_window_and_its_tail_in_order(tmp_path):
+    """Through the database: heart rate inside the workout and in the 5-minute tail,
+    and Apple's recovery figure, come back as typed readings in start order. A reading
+    in another workout's window, and the malformed one, are not included."""
+    export = tmp_path / "export.xml"
+    export.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n<!-- SYNTHETIC -->\n<HealthData>'
+        '<Workout workoutActivityType="HKWorkoutActivityTypeRunning" duration="30" '
+        'durationUnit="min" sourceName="Test Watch" '
+        'startDate="2026-03-01 10:00:00 +0000" endDate="2026-03-01 10:30:00 +0000"/>'
+        '<Workout workoutActivityType="HKWorkoutActivityTypeRunning" duration="30" '
+        'durationUnit="min" sourceName="Test Watch" '
+        'startDate="2026-03-01 12:00:00 +0000" endDate="2026-03-01 12:30:00 +0000"/>'
+        '<Record type="HKQuantityTypeIdentifierHeartRate" sourceName="Test Watch" '
+        'unit="count/min" value="150" '
+        'startDate="2026-03-01 10:10:00 +0000" endDate="2026-03-01 10:24:00 +0000"/>'
+        '<Record type="HKQuantityTypeIdentifierHeartRateRecoveryOneMinute" '
+        'sourceName="Test Watch" unit="count/min" value="25" '
+        'startDate="2026-03-01 10:32:58 +0000" endDate="2026-03-01 10:32:58 +0000"/>'
+        '<Record type="HKQuantityTypeIdentifierHeartRate" sourceName="Test Watch" '
+        'unit="count/min" value="130" '
+        'startDate="2026-03-01 10:31:00 +0000" endDate="2026-03-01 10:31:00 +0000"/>'
+        '<Record type="HKQuantityTypeIdentifierHeartRate" sourceName="Test Watch" '
+        'unit="count/min" value="160" '
+        'startDate="2026-03-01 12:10:00 +0000" endDate="2026-03-01 12:10:00 +0000"/>'
+        "</HealthData>",
+        encoding="utf-8",
+    )
+    db = tmp_path / "health.sqlite"
+    import_export(export, db)
+    import_samples(export, db)
+
+    conn = connect(db)
+    try:
+        first = load_workouts(conn)[0]
+        readings = readings_around(conn, first)
+    finally:
+        conn.close()
+
+    at = datetime(2026, 3, 1, tzinfo=UTC)
+    assert readings == [
+        Reading(HEART_RATE, at.replace(hour=10, minute=10), at.replace(hour=10, minute=24), 150.0),
+        _instant(at.replace(hour=10, minute=31), 130.0),
+        _instant(at.replace(hour=10, minute=32, second=58), 25.0, kind=HEART_RATE_RECOVERY),
+    ]

@@ -1,9 +1,13 @@
 """Training analysis over the local database: the pieces the summary is built from.
 
-It starts with de-duplication (issue #7). Import keeps a faithful copy of the export,
-so a session recorded by two sources (the Watch's own workout plus a surf-tracking app
-or Strava) is stored twice. Session counts and weekly minutes must count it once, and
+De-duplication (issue #7): import keeps a faithful copy of the export, so a session
+recorded by two sources (the Watch's own workout plus a surf-tracking app or Strava)
+is stored twice. Session counts and weekly minutes must count it once, and
 ``distinct_sessions`` decides which record stands for it.
+
+Heart rate: ``heart_rate_summary`` gives one session's average and peak heart rate,
+its measured one-minute recovery, and Apple's own recovery figure, labelled as an
+estimate.
 
 Public API:
 - ``StoredWorkout``                         -> one row of the workouts table, typed
@@ -11,6 +15,8 @@ Public API:
 - ``heart_rate_counts_by_source(conn)``     -> heart-rate readings stored per source
 - ``is_same_session(a, b)``                 -> are two records one session?
 - ``distinct_sessions(workouts, counts)``   -> one record per session
+- ``Reading`` / ``readings_around(conn, w)`` -> a session's stored readings, typed
+- ``HeartRateSummary`` / ``heart_rate_summary(w, readings)`` -> its heart-rate figures
 
 Read-only: nothing here writes to the database.
 """
@@ -20,9 +26,14 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from apple_health_mcp.ingest import HEART_RATE
+from apple_health_mcp.ingest import HEART_RATE, HEART_RATE_RECOVERY, RECOVERY_WINDOW
+
+# Measured recovery reads heart rate one minute after the workout ends, from the
+# instant reading nearest that moment within this tolerance either side.
+ONE_MINUTE_AFTER = timedelta(seconds=60)
+ONE_MINUTE_TOLERANCE = timedelta(seconds=15)
 
 
 @dataclass(frozen=True)
@@ -35,6 +46,8 @@ class StoredWorkout:
       "Africa/Johannesburg", or an offset such as "+0200" when the export gave none.
       It is what places a workout in a local day or week.
     - ``duration_s`` and ``active_energy_kcal`` may be ``None``, as in the table.
+    - ``heart_rate_average_bpm`` and ``heart_rate_maximum_bpm`` are Apple's own
+      figures for the whole workout, or ``None`` when the export had none.
     """
 
     id: str
@@ -43,6 +56,8 @@ class StoredWorkout:
     end: datetime
     duration_s: float | None
     active_energy_kcal: float | None
+    heart_rate_average_bpm: float | None
+    heart_rate_maximum_bpm: float | None
     source_name: str
     tz: str
 
@@ -60,7 +75,8 @@ def load_workouts(conn: sqlite3.Connection) -> list[StoredWorkout]:
     """
     rows = conn.execute(
         "SELECT id, activity_type, start_utc, end_utc, duration_s, active_energy_kcal,"
-        " source_name, tz FROM workouts ORDER BY start_utc, id"
+        " heart_rate_average_bpm, heart_rate_maximum_bpm, source_name, tz"
+        " FROM workouts ORDER BY start_utc, id"
     )
     return [
         StoredWorkout(
@@ -70,6 +86,8 @@ def load_workouts(conn: sqlite3.Connection) -> list[StoredWorkout]:
             end=datetime.fromisoformat(end_utc),
             duration_s=duration_s,
             active_energy_kcal=active_energy_kcal,
+            heart_rate_average_bpm=heart_rate_average_bpm,
+            heart_rate_maximum_bpm=heart_rate_maximum_bpm,
             source_name=source_name,
             tz=tz,
         )
@@ -80,6 +98,8 @@ def load_workouts(conn: sqlite3.Connection) -> list[StoredWorkout]:
             end_utc,
             duration_s,
             active_energy_kcal,
+            heart_rate_average_bpm,
+            heart_rate_maximum_bpm,
             source_name,
             tz,
         ) in rows
@@ -169,3 +189,133 @@ def distinct_sessions(
         ):
             kept_ids.add(workout.id)
     return [w for w in by_start if w.id in kept_ids]
+
+
+@dataclass(frozen=True)
+class Reading:
+    """One stored reading of heart rate or of Apple's one-minute recovery figure.
+
+    Invariants: ``start`` and ``end`` are timezone-aware UTC datetimes; ``end`` equals
+    ``start`` for an instant reading and is later for a span (one value Apple stores
+    as the average over several minutes); ``bpm`` is a number, never absent.
+    """
+
+    type: str
+    start: datetime
+    end: datetime
+    bpm: float
+
+    @property
+    def is_instant(self) -> bool:
+        return self.end == self.start
+
+
+def readings_around(conn: sqlite3.Connection, workout: StoredWorkout) -> list[Reading]:
+    """The heart-rate and recovery readings that start inside ``workout`` or in its
+    recovery tail, ``[start, end + RECOVERY_WINDOW]``, sorted by start.
+
+    Selected by time range, not by ``workout_id``, because a reading shared by two
+    overlapping workouts is tagged with only one of them. A reading stored without a
+    value is left out.
+    """
+    rows = conn.execute(
+        "SELECT type, start_utc, end_utc, value FROM samples"
+        " WHERE type IN (?, ?) AND start_utc >= ? AND start_utc <= ? AND value IS NOT NULL"
+        " ORDER BY start_utc, type",
+        (
+            HEART_RATE,
+            HEART_RATE_RECOVERY,
+            workout.start.isoformat(),
+            (workout.end + RECOVERY_WINDOW).isoformat(),
+        ),
+    )
+    return [
+        Reading(
+            type=kind,
+            start=datetime.fromisoformat(start_utc),
+            end=datetime.fromisoformat(end_utc),
+            bpm=float(value),
+        )
+        for kind, start_utc, end_utc, value in rows
+    ]
+
+
+@dataclass(frozen=True)
+class HeartRateSummary:
+    """One session's heart-rate figures, each ``None`` when there is nothing to base
+    it on (never 0, which would read as a real heart rate).
+
+    - ``average_bpm``: Apple's average, or else computed from the readings.
+    - ``peak_bpm``: Apple's maximum only. Spans are averages and hide the peak, so
+      the readings never stand in for it.
+    - ``measured_recovery_bpm``: peak minus the heart rate one minute after the end.
+      If the workout was ended a while after the effort stopped, heart rate was
+      already falling, so this covers more than a minute of recovery and reads high.
+    - ``apple_recovery_estimate_bpm``: Apple's one-minute recovery record. Apple can
+      write it as a prediction rather than a measurement, and the import does not
+      keep which, so it is an estimate, never ground truth.
+    """
+
+    average_bpm: float | None
+    peak_bpm: float | None
+    measured_recovery_bpm: float | None
+    apple_recovery_estimate_bpm: float | None
+
+
+def heart_rate_summary(workout: StoredWorkout, readings: Iterable[Reading]) -> HeartRateSummary:
+    """Summarise one session's heart rate from Apple's statistic and its readings.
+
+    Precondition: ``readings`` are this workout's, as ``readings_around`` returns them
+    (any order).
+
+    - Average: Apple's when present. Otherwise the mean of the heart-rate spans that
+      start inside the workout, each weighted by the time it covers before the end;
+      when no span covers any time inside, the plain mean of instant readings inside
+      ``[start, end]``.
+    - Measured recovery: ``peak_bpm`` minus the instant heart-rate reading nearest to
+      ``end + ONE_MINUTE_AFTER``, within ``ONE_MINUTE_TOLERANCE`` either side (both
+      bounds inclusive; a tie goes to the earlier reading). Spans are excluded.
+    - Apple's estimate: the earliest recovery record in ``[end, end + RECOVERY_WINDOW]``.
+    """
+    heart_rate = [r for r in readings if r.type == HEART_RATE]
+    recovery_records = sorted(
+        (r for r in readings if r.type == HEART_RATE_RECOVERY), key=lambda r: r.start
+    )
+
+    peak = workout.heart_rate_maximum_bpm
+    average = workout.heart_rate_average_bpm
+    if average is None:
+        average = _average_from_readings(workout, heart_rate)
+
+    target = workout.end + ONE_MINUTE_AFTER
+    near_one_minute = [
+        r for r in heart_rate if r.is_instant and abs(r.start - target) <= ONE_MINUTE_TOLERANCE
+    ]
+    measured_recovery = None
+    if peak is not None and near_one_minute:
+        nearest = min(near_one_minute, key=lambda r: (abs(r.start - target), r.start))
+        measured_recovery = peak - nearest.bpm
+
+    in_tail = [
+        r for r in recovery_records if workout.end <= r.start <= workout.end + RECOVERY_WINDOW
+    ]
+    apple_estimate = in_tail[0].bpm if in_tail else None
+
+    return HeartRateSummary(
+        average_bpm=average,
+        peak_bpm=peak,
+        measured_recovery_bpm=measured_recovery,
+        apple_recovery_estimate_bpm=apple_estimate,
+    )
+
+
+def _average_from_readings(workout: StoredWorkout, heart_rate: list[Reading]) -> float | None:
+    """The fallback average when Apple gave none; ``None`` with nothing inside."""
+    inside = [r for r in heart_rate if workout.start <= r.start <= workout.end]
+    spans = [r for r in inside if not r.is_instant]
+    if spans:
+        weights = [(min(r.end, workout.end) - r.start).total_seconds() for r in spans]
+        if sum(weights) > 0:
+            return sum(w * r.bpm for w, r in zip(weights, spans, strict=True)) / sum(weights)
+    instants = [r.bpm for r in inside if r.is_instant]
+    return sum(instants) / len(instants) if instants else None

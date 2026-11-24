@@ -54,6 +54,8 @@ def _w(
         end=_BASE + timedelta(minutes=end_min),
         duration_s=None,
         active_energy_kcal=None,
+        heart_rate_average_bpm=None,
+        heart_rate_maximum_bpm=None,
         source_name=source,
         tz="Africa/Johannesburg",
     )
