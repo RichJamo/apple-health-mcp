@@ -17,6 +17,8 @@ Public API:
 - ``distinct_sessions(workouts, counts)``   -> one record per session
 - ``Reading`` / ``readings_around(conn, w)`` -> a session's stored readings, typed
 - ``HeartRateSummary`` / ``heart_rate_summary(w, readings)`` -> its heart-rate figures
+- ``WeekSummary`` / ``weekly_summary(sessions)`` / ``weekly_summary_from_db(conn)``
+                                           -> training per local week (step 4)
 
 Read-only: nothing here writes to the database.
 """
@@ -27,7 +29,7 @@ import math
 import sqlite3
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from apple_health_mcp.ingest import HEART_RATE, HEART_RATE_RECOVERY, RECOVERY_WINDOW
 from apple_health_mcp.parse import MalformedRecordError
@@ -352,3 +354,73 @@ def _average_from_readings(workout: StoredWorkout, heart_rate: list[Reading]) ->
             return sum(w * r.bpm for w, r in zip(weights, spans, strict=True)) / sum(weights)
     instants = [r.bpm for r in inside if r.is_instant]
     return sum(instants) / len(instants) if instants else None
+
+
+# --- Weekly training summary (step 4) ---------------------------------------------------
+#
+# Rich implements these three against tests/test_weekly_summary.py, in this order. Each
+# docstring is the contract: preconditions, what it returns, and the invariants the
+# tests check. Delete the NotImplementedError line once the body is written.
+
+
+@dataclass(frozen=True)
+class WeekSummary:
+    """One Monday-to-Sunday week of training, in local time.
+
+    - ``week_start``: the Monday that starts the week, as a local calendar date.
+    - ``sessions``: how many sessions started in the week (0 for an empty week).
+    - ``minutes``: the sessions' durations added up, from ``duration_s`` (Apple's
+      duration, which leaves pauses out), or from start to end when that is ``None``.
+    - ``active_energy_kcal``: the known energy figures added up; ``None`` when no
+      session in the week has one, which includes a week with no sessions.
+    - ``sessions_by_type``: sessions per ``activity_type``; its counts add up to
+      ``sessions``. Empty for an empty week.
+    """
+
+    week_start: date
+    sessions: int
+    minutes: float
+    active_energy_kcal: float | None
+    sessions_by_type: dict[str, int]
+
+
+def local_start(workout: StoredWorkout) -> datetime:
+    """``workout.start`` shown in the zone the workout was recorded in.
+
+    ``workout.tz`` is either a zone name that ``zoneinfo.ZoneInfo`` accepts (such as
+    "Africa/Johannesburg") or a bare offset of the form "+HHMM" / "-HHMM" (such as
+    "+0200" or "-0500"), which ``datetime.timezone`` can represent.
+
+    Postcondition: the result is the same moment as ``workout.start`` (equal when
+    compared), only with the local offset, so ``.date()`` gives the local calendar day.
+    """
+    raise NotImplementedError("step 4: implement against tests/test_weekly_summary.py")
+
+
+def weekly_summary(sessions: Iterable[StoredWorkout]) -> list[WeekSummary]:
+    """One :class:`WeekSummary` per local week, from the first session's week to the
+    last session's week, oldest first. An empty input gives ``[]``.
+
+    Precondition: ``sessions`` are distinct sessions (from ``distinct_sessions``);
+    this function does not de-duplicate.
+
+    A session belongs to the week in which it *starts*, in local time
+    (``local_start``), even if it runs past Sunday midnight.
+
+    Postconditions (checked by the tests):
+    - every ``week_start`` is a Monday, and each is seven days after the one before:
+      weeks with no session in between are included, so gaps show in a trend;
+    - the ``sessions`` counts add up to the number of input sessions;
+    - the result does not depend on the input's order.
+    """
+    raise NotImplementedError("step 4: implement against tests/test_weekly_summary.py")
+
+
+def weekly_summary_from_db(conn: sqlite3.Connection) -> list[WeekSummary]:
+    """The weekly summary of every stored session, read from the database.
+
+    It must count a session recorded by two sources once: the workouts table keeps
+    both records, so this starts from ``distinct_sessions`` (with the heart-rate
+    counts it needs), never from the table's rows directly.
+    """
+    raise NotImplementedError("step 4: implement against tests/test_weekly_summary.py")
