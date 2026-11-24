@@ -248,12 +248,14 @@ def test_ids_are_pinned_to_the_schema_version():
         end=datetime(2026, 3, 1, 8, 30, tzinfo=UTC),
         duration_s=1800.0,
         active_energy_kcal=None,
+        heart_rate_average_bpm=None,
+        heart_rate_maximum_bpm=None,
         source_name="Test Watch",
         metadata={},
     )
 
     assert (SCHEMA_VERSION, sample_id(span), workout_id(run)) == (
-        1,
+        2,  # bumped for the heart-rate columns; the id keys did not change
         "be1af874e08737fe00bf2019202e242b061a1352990106696a76c3552c25dee3",
         "dc3af6136b4c5cc026e41b995f2f55b5cd4ed3a90857e52e2555216ab6537fe5",
     )

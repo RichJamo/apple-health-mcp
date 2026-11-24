@@ -40,7 +40,7 @@ from apple_health_mcp.parse import Workout
 # differently: new ids would make a re-import store every row a second time, with no
 # error. A database built at another version is refused, not patched. The golden-id
 # test in tests/test_schema.py fails when a key changes, as the reminder to bump this.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2: workouts gained Apple's heart-rate average and maximum
 
 
 class SchemaVersionError(Exception):
@@ -69,6 +69,8 @@ _WORKOUT_COLUMNS = (
     "end_utc",
     "duration_s",
     "active_energy_kcal",
+    "heart_rate_average_bpm",
+    "heart_rate_maximum_bpm",
     "source_name",
     "tz",
     "raw_metadata",
@@ -102,8 +104,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
 
     Idempotent by design: ``IF NOT EXISTS`` means calling this on an existing
     database is a no-op, so ingest can call it on every run without caring whether
-    the file is new. Nullable columns (``duration_s``, ``active_energy_kcal``) are
-    left nullable on purpose — a Yoga session has no energy statistic, and the
+    the file is new. Nullable columns (``duration_s``, ``active_energy_kcal`` and the
+    two ``heart_rate_*_bpm`` columns) are left nullable on purpose — a Yoga session
+    has no energy statistic, older workouts have no heart-rate statistic, and the
     schema must store that as NULL rather than reject the row.
 
     ``samples`` holds time-series readings (heart rate), indexed on
@@ -134,6 +137,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
             end_utc             TEXT NOT NULL,
             duration_s          REAL,
             active_energy_kcal  REAL,
+            heart_rate_average_bpm  REAL,
+            heart_rate_maximum_bpm  REAL,
             source_name         TEXT NOT NULL,
             tz                  TEXT NOT NULL,
             raw_metadata        TEXT NOT NULL
@@ -178,6 +183,8 @@ def _row_values(workout: Workout) -> tuple:
         workout.end.astimezone(UTC).isoformat(),
         workout.duration_s,
         workout.active_energy_kcal,
+        workout.heart_rate_average_bpm,
+        workout.heart_rate_maximum_bpm,
         workout.source_name,
         workout.metadata.get("HKTimeZone") or workout.start.strftime("%z"),
         json.dumps(workout.metadata, sort_keys=True),

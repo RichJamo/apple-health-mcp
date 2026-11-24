@@ -45,6 +45,10 @@ class Workout:
     - ``duration_s`` is seconds, or ``None`` if the source omitted a duration.
     - ``active_energy_kcal`` comes from the ``ActiveEnergyBurned`` WorkoutStatistics
       child, NOT basal energy, and is ``None`` when the workout has no such child.
+    - ``heart_rate_average_bpm`` and ``heart_rate_maximum_bpm`` are Apple's own
+      figures for the whole workout, from the WorkoutStatistics child whose type is
+      exactly ``HKQuantityTypeIdentifierHeartRate`` (not RestingHeartRate, which
+      shares the suffix). Each is ``None`` when the workout has no such child.
     - ``metadata`` has one entry per key (Apple duplicates some; last value wins).
     """
 
@@ -53,6 +57,8 @@ class Workout:
     end: datetime
     duration_s: float | None
     active_energy_kcal: float | None
+    heart_rate_average_bpm: float | None
+    heart_rate_maximum_bpm: float | None
     source_name: str
     metadata: dict[str, str]
 
@@ -137,9 +143,21 @@ def iter_workouts(source) -> Iterator[Workout]:
         yield _workout_from_element(elem)
 
 
+# The one WorkoutStatistics type that holds the workout's own heart rate. Matched
+# exactly: RestingHeartRate and others end in "HeartRate" too.
+_HEART_RATE_STATISTIC = "HKQuantityTypeIdentifierHeartRate"
+
+
+def _optional_float(text: str | None) -> float | None:
+    """``float(text)``, or ``None`` when the attribute is absent."""
+    return None if text is None else float(text)
+
+
 def _workout_from_element(elem: ET.Element) -> Workout:
     """Build a :class:`Workout` from one ``<Workout>`` element and its children."""
     active_energy_kcal: float | None = None
+    heart_rate_average_bpm: float | None = None
+    heart_rate_maximum_bpm: float | None = None
     metadata: dict[str, str] = {}
 
     for child in elem:
@@ -149,6 +167,9 @@ def _workout_from_element(elem: ET.Element) -> Workout:
                 total = child.attrib.get("sum")
                 if total is not None:
                     active_energy_kcal = float(total)
+            elif stat_type == _HEART_RATE_STATISTIC:
+                heart_rate_average_bpm = _optional_float(child.attrib.get("average"))
+                heart_rate_maximum_bpm = _optional_float(child.attrib.get("maximum"))
         elif child.tag == "MetadataEntry":
             # Later duplicates overwrite earlier ones, collapsing to one per key.
             metadata[child.attrib["key"]] = child.attrib["value"]
@@ -159,6 +180,8 @@ def _workout_from_element(elem: ET.Element) -> Workout:
         end=_parse_apple_datetime(elem.attrib["endDate"]),
         duration_s=_duration_seconds(elem.attrib.get("duration"), elem.attrib.get("durationUnit")),
         active_energy_kcal=active_energy_kcal,
+        heart_rate_average_bpm=heart_rate_average_bpm,
+        heart_rate_maximum_bpm=heart_rate_maximum_bpm,
         source_name=elem.attrib.get("sourceName", ""),
         metadata=metadata,
     )
