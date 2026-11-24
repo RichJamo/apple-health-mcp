@@ -78,9 +78,16 @@ data-free schema):
    carry no `totalEnergyBurned` attribute; active energy is in
    `WorkoutStatistics[type=ActiveEnergyBurned].sum`. The parser reads it there, with
    the attribute as fallback only.
-2. **Per-workout heart rate is often absent as a statistic.** When a workout has no
-   `WorkoutStatistics` for heart rate, average/max are **computed from the
-   `HeartRate` records whose timestamp falls in the workout's [start, end] window.**
+2. **Per-workout heart rate: Apple's statistic first; the readings hide the peak.**
+   Apple's `WorkoutStatistics` of type `HeartRate` (average, maximum) exists only on
+   workouts from late 2022 on, about half the sessions. Inside a workout Apple mostly
+   stores heart rate as *spans*: one value covering several minutes, which is the
+   average over that stretch: on sessions that have Apple's average, a span-weighted
+   mean is a median 0.3 bpm away from it. So average heart rate falls back to that
+   weighted mean when the statistic is absent (on older sessions, where it cannot be
+   checked against Apple's figure), but peak heart rate comes **only** from the statistic: the
+   highest span reads well below Apple's maximum. The parser stores average and
+   maximum on the workout (schema version 2).
 3. **Timestamps carry their UTC offset** (e.g. `+0200`) plus an `HKTimeZone`
    metadata entry. Store UTC and the original zone; never discard the offset.
 4. **Apple duplicates some `MetadataEntry` lines.** De-dupe by key.
@@ -101,11 +108,17 @@ designed to preserve it from the start, even though the recovery *number* is com
 later. Two independent sources:
 
 - **Apple's own figure:** 232 `HeartRateRecoveryOneMinute` records (2022+, the
-  watchOS 9 feature — verified: none before 2022). Ingest these as an ordinary metric;
-  they give Apple's one-minute recovery for the workouts that have it, as a cross-check.
-- **Computed from samples:** the Watch keeps logging heart rate in the background after
-  a workout ends, so recovery can be computed from the `HeartRate` records in the window
-  *after* `endDate` (e.g. HR at end vs. one and two minutes later) — no cooldown needed.
+  watchOS 9 feature — verified: none before 2022), each about three minutes after a
+  workout ends. Their metadata marks them as predictions from a submaximal test, not
+  measurements, so analysis reports them labelled as an estimate, never as ground truth.
+- **Measured from samples:** the Watch keeps logging instant heart-rate readings in the
+  background after a workout ends. "Heart rate at the end" is usually not measurable,
+  because the last minutes inside the workout are a span. So measured recovery is
+  Apple's maximum minus the instant reading nearest one minute after the end (within
+  15 s either side): the drop from the session's peak, which equals a true one-minute
+  recovery only when the peak came at the end. It exists for about half the sessions, those with Apple's maximum.
+  If a workout is ended a while after the effort stopped, heart rate was already
+  falling, so the figure covers more than a minute of recovery and reads high.
 
 Two design consequences, to honour when we build ingest and analyze:
 
@@ -114,7 +127,7 @@ Two design consequences, to honour when we build ingest and analyze:
    not just `[start, end]`, or the very samples recovery needs get dropped. Also import
    the `HeartRateRecoveryOneMinute` records.
 2. **Recovery is derived, not stored raw.** It is computed in `analyze.py`
-   (`heart_rate_recovery(workout)`) from samples already in the DB. The four-table model
+   (`heart_rate_summary(workout, readings)`) from samples already in the DB. The four-table model
    needs no new column now; if we later cache the figure, it belongs in a derived
    `workout_metrics` table, never mixed into raw `samples`.
 
@@ -150,8 +163,10 @@ feedback decoupled from Apple's schema.
 
 - **`workouts`** — `id` (stable hash of source key), `source_uuid`, `type`,
   `start_utc`, `end_utc`, `duration_s`, `tz`, `active_energy_kcal`
-  (from WorkoutStatistics), `source_name`, `raw_metadata` (JSON).
-- **`samples`** — time-series: `type`, `start_utc`, `value`, `unit`, nullable
+  (from WorkoutStatistics), `heart_rate_average_bpm` and `heart_rate_maximum_bpm`
+  (Apple's statistic, NULL when absent), `source_name`, `raw_metadata` (JSON).
+- **`samples`** — time-series: `type`, `start_utc`, `end_utc` (equal to `start_utc`
+  for an instant reading, later for a span), `value`, `unit`, `source_name`, nullable
   `workout_id`. Indexed on `(type, start_utc)`.
 - **`workout_feedback`** — our own schema, FK to `workouts.id`:
   `difficulty_1_10`, `limiter` (muscular/cardio), `soreness`, `weights_note`,
@@ -162,9 +177,9 @@ feedback decoupled from Apple's schema.
 with `ON CONFLICT DO NOTHING`, so re-importing the same or an overlapping export
 never duplicates.
 
-**Source dedup (to decide against real data):** the same metric can appear from the
-Watch, the iPhone and third-party apps. Likely rule: prefer the Apple Watch source
-for workouts. Made explicit and documented rather than chosen silently.
+**Source dedup:** the same metric can appear from the Watch, the iPhone and
+third-party apps. The rule for workouts is decided below, made explicit and
+documented rather than chosen silently.
 
 Seen in the first real export: at least 32 pairs of workouts whose start and end both
 fall within 3 minutes of each other, and every such pair comes from two different
@@ -173,11 +188,21 @@ is one session stored twice, because `workout_id` includes the source. Heart rat
 unaffected (each reading is stored once), but session counts and weekly minutes would
 count these twice.
 
-**Decided (Rich):** keep both rows as recorded, and de-duplicate in `analyze.py`. When
-two sources record overlapping sessions of the same type, the summary counts the
-session once and prefers the Apple Watch record, since the heart rate comes from the
-Watch. Import stays a faithful copy of the export, so nothing the other app recorded
-is lost.
+**Decided (Rich):** keep both rows as recorded, and de-duplicate in `analyze.py`
+(`distinct_sessions`). Two records from different sources are one session when the
+time they share is positive and at least half the shorter recording, whatever
+activity type each gave it (Strava can say Running where the Watch says Other).
+Records are taken best first: the source that wrote the most heart rate, which is the
+Watch, then the longer recording. Each is kept unless it is the same session as a
+record already kept. The Watch is recognised by its heart rate, not by name, because
+its source name is whatever the owner called the device. So a record is dropped only
+for a direct duplicate that ranks above it, never through a chain of overlaps, and no
+two kept records are the same session. Two Watch workouts are never merged with each
+other, even when one app recording spans both. Import stays a faithful copy of the
+export, so nothing the other app recorded is lost.
+
+On the first real export this counts 1,448 stored workouts as 1,404 sessions: 44 app
+records are dropped as second recordings, and no Watch record is dropped.
 
 ## 6. Privacy model
 
