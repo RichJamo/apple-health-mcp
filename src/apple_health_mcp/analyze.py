@@ -6,8 +6,8 @@ is stored twice. Session counts and weekly minutes must count it once, and
 ``distinct_sessions`` decides which record stands for it.
 
 Heart rate: ``heart_rate_summary`` gives one session's average and peak heart rate,
-its measured one-minute recovery, and Apple's own recovery figure, labelled as an
-estimate.
+its measured recovery (the drop from the session's peak to one minute after the end),
+and Apple's own one-minute recovery figure, labelled as an estimate.
 
 Public API:
 - ``StoredWorkout``                         -> one row of the workouts table, typed
@@ -26,9 +26,10 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from apple_health_mcp.ingest import HEART_RATE, HEART_RATE_RECOVERY, RECOVERY_WINDOW
+from apple_health_mcp.parse import MalformedRecordError
 
 # Measured recovery reads heart rate one minute after the workout ends, from the
 # instant reading nearest that moment within this tolerance either side.
@@ -216,7 +217,12 @@ def readings_around(conn: sqlite3.Connection, workout: StoredWorkout) -> list[Re
 
     Selected by time range, not by ``workout_id``, because a reading shared by two
     overlapping workouts is tagged with only one of them. A reading stored without a
-    value is left out.
+    value is left out. Both bounds are inclusive and taken in UTC, as stored, whatever
+    offset ``workout``'s times carry.
+
+    Raises :class:`~apple_health_mcp.parse.MalformedRecordError` if a stored value is
+    not a number. Its message names only the reading's type: Python's own error would
+    quote the raw value.
     """
     rows = conn.execute(
         "SELECT type, start_utc, end_utc, value FROM samples"
@@ -225,8 +231,8 @@ def readings_around(conn: sqlite3.Connection, workout: StoredWorkout) -> list[Re
         (
             HEART_RATE,
             HEART_RATE_RECOVERY,
-            workout.start.isoformat(),
-            (workout.end + RECOVERY_WINDOW).isoformat(),
+            workout.start.astimezone(UTC).isoformat(),
+            (workout.end + RECOVERY_WINDOW).astimezone(UTC).isoformat(),
         ),
     )
     return [
@@ -234,10 +240,18 @@ def readings_around(conn: sqlite3.Connection, workout: StoredWorkout) -> list[Re
             type=kind,
             start=datetime.fromisoformat(start_utc),
             end=datetime.fromisoformat(end_utc),
-            bpm=float(value),
+            bpm=_stored_bpm(kind, value),
         )
         for kind, start_utc, end_utc, value in rows
     ]
+
+
+def _stored_bpm(kind: str, value: str) -> float:
+    """``float(value)``, with an error that does not quote the value if it fails."""
+    try:
+        return float(value)
+    except ValueError:
+        raise MalformedRecordError(f"non-numeric {kind} value in the database") from None
 
 
 @dataclass(frozen=True)
@@ -248,9 +262,12 @@ class HeartRateSummary:
     - ``average_bpm``: Apple's average, or else computed from the readings.
     - ``peak_bpm``: Apple's maximum only. Spans are averages and hide the peak, so
       the readings never stand in for it.
-    - ``measured_recovery_bpm``: peak minus the heart rate one minute after the end.
-      If the workout was ended a while after the effort stopped, heart rate was
-      already falling, so this covers more than a minute of recovery and reads high.
+    - ``measured_recovery_bpm``: the drop from the session's peak to the heart rate
+      one minute after the end. It equals a true one-minute recovery only when the
+      peak came at the end; when the peak came earlier (intervals, surfing), or the
+      workout was ended a while after the effort stopped, it covers more than a
+      minute of recovery and reads high. It can be negative, when the reading after
+      the end is above Apple's maximum.
     - ``apple_recovery_estimate_bpm``: Apple's one-minute recovery record. Apple can
       write it as a prediction rather than a measurement, and the import does not
       keep which, so it is an estimate, never ground truth.
@@ -265,8 +282,8 @@ class HeartRateSummary:
 def heart_rate_summary(workout: StoredWorkout, readings: Iterable[Reading]) -> HeartRateSummary:
     """Summarise one session's heart rate from Apple's statistic and its readings.
 
-    Precondition: ``readings`` are this workout's, as ``readings_around`` returns them
-    (any order).
+    Precondition: ``readings`` are this workout's, as ``readings_around`` returns them,
+    in any order. Any iterable works, a generator included: it is read once.
 
     - Average: Apple's when present. Otherwise the mean of the heart-rate spans that
       start inside the workout, each weighted by the time it covers before the end;
@@ -277,6 +294,7 @@ def heart_rate_summary(workout: StoredWorkout, readings: Iterable[Reading]) -> H
       bounds inclusive; a tie goes to the earlier reading). Spans are excluded.
     - Apple's estimate: the earliest recovery record in ``[end, end + RECOVERY_WINDOW]``.
     """
+    readings = list(readings)  # read once: a generator would be empty the second time
     heart_rate = [r for r in readings if r.type == HEART_RATE]
     recovery_records = sorted(
         (r for r in readings if r.type == HEART_RATE_RECOVERY), key=lambda r: r.start
@@ -310,11 +328,15 @@ def heart_rate_summary(workout: StoredWorkout, readings: Iterable[Reading]) -> H
 
 
 def _average_from_readings(workout: StoredWorkout, heart_rate: list[Reading]) -> float | None:
-    """The fallback average when Apple gave none; ``None`` with nothing inside."""
+    """The fallback average when Apple gave none; ``None`` with nothing inside.
+
+    A span whose end is before its start (never seen, and not checked at import)
+    gets no weight rather than a negative one, so the mean stays within its inputs.
+    """
     inside = [r for r in heart_rate if workout.start <= r.start <= workout.end]
     spans = [r for r in inside if not r.is_instant]
     if spans:
-        weights = [(min(r.end, workout.end) - r.start).total_seconds() for r in spans]
+        weights = [max(0.0, (min(r.end, workout.end) - r.start).total_seconds()) for r in spans]
         if sum(weights) > 0:
             return sum(w * r.bpm for w, r in zip(weights, spans, strict=True)) / sum(weights)
     instants = [r.bpm for r in inside if r.is_instant]

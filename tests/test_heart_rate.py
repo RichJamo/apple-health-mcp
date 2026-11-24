@@ -8,7 +8,9 @@ so this statistic is the only accurate peak; it is kept on the workout row.
 Synthetic data only, never real health data.
 """
 
-from datetime import UTC, datetime, timedelta
+import traceback
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 
@@ -22,9 +24,9 @@ from apple_health_mcp.analyze import (
     load_workouts,
     readings_around,
 )
-from apple_health_mcp.db import connect
+from apple_health_mcp.db import Sample, connect, upsert_samples
 from apple_health_mcp.ingest import HEART_RATE, HEART_RATE_RECOVERY, import_export, import_samples
-from apple_health_mcp.parse import iter_workouts
+from apple_health_mcp.parse import MalformedRecordError, iter_workouts
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_export.xml"
 
@@ -254,48 +256,176 @@ def test_with_no_readings_and_no_statistic_everything_is_absent():
     )
 
 
-def test_readings_around_loads_the_window_and_its_tail_in_order(tmp_path):
-    """Through the database: heart rate inside the workout and in the 5-minute tail,
-    and Apple's recovery figure, come back as typed readings in start order. A reading
-    in another workout's window, and the malformed one, are not included."""
+def test_a_generator_of_readings_gives_the_same_summary_as_a_list():
+    """The summary reads its input once, so a generator is not used up halfway: with
+    a generator, Apple's recovery figure (read after the heart rate) used to be lost."""
+    readings = [
+        _instant(_minute(10), 150.0),
+        _instant(_after_end(60), 130.0),
+        _instant(_after_end(178), 25.0, kind=HEART_RATE_RECOVERY),
+    ]
+    workout = _workout(average=140.0, maximum=170.0)
+
+    from_generator = heart_rate_summary(workout, (r for r in readings))
+
+    assert from_generator == heart_rate_summary(workout, readings)
+    assert from_generator.apple_recovery_estimate_bpm == 25.0
+
+
+def test_spans_that_cover_no_time_inside_fall_back_to_the_instants():
+    """A span starting exactly at the end covers no time inside the workout, so the
+    average falls back to the instants: (120 + 160) / 2."""
+    readings = [
+        _span(_END, _END + timedelta(minutes=10), 90.0),
+        _instant(_minute(5), 120.0),
+        _instant(_minute(25), 160.0),
+    ]
+
+    assert heart_rate_summary(_workout(), readings).average_bpm == 140.0
+
+
+def test_instants_at_exactly_the_start_and_end_count_in_the_average():
+    """[start, end] is inclusive at both ends; one second after the end does not count."""
+    readings = [
+        _instant(_START, 100.0),
+        _instant(_END, 140.0),
+        _instant(_after_end(1), 400.0),
+    ]
+
+    assert heart_rate_summary(_workout(), readings).average_bpm == 120.0
+
+
+def test_a_span_ending_before_it_starts_gets_no_weight():
+    """Never seen in an export, and not checked at import: a reversed span would get a
+    negative weight and drag the mean outside its inputs. It gets none instead."""
+    readings = [
+        _span(_minute(0), _minute(10), 100.0),
+        _span(_minute(20), _minute(15), 200.0),  # ends five minutes before it starts
+    ]
+
+    assert heart_rate_summary(_workout(), readings).average_bpm == 100.0
+
+
+@pytest.mark.parametrize(
+    ("seconds_after_end", "reported"),
+    [(0, True), (300, True), (301, False)],
+    ids=["at the end", "at end + 5 min", "one second later"],
+)
+def test_apples_estimate_window_is_inclusive(seconds_after_end, reported):
+    """Apple's recovery record counts from exactly the end to exactly 5 minutes after."""
+    record = _instant(_after_end(seconds_after_end), 25.0, kind=HEART_RATE_RECOVERY)
+
+    estimate = heart_rate_summary(_workout(), [record]).apple_recovery_estimate_bpm
+
+    assert estimate == (25.0 if reported else None)
+
+
+# A workout at 12:00-12:30 +0200 (10:00-10:30 UTC), so the stored times are converted;
+# a second workout two hours later; readings placed on and around the bounds. The
+# recovery record at 12:31:30 starts between two heart-rate readings, so a result
+# grouped by type instead of sorted by start shows up.
+_AROUND_EXPORT = """<?xml version="1.0" encoding="UTF-8"?>
+<!-- SYNTHETIC: one workout with readings on and around its bounds, and another. -->
+<HealthData>
+ <Workout workoutActivityType="HKWorkoutActivityTypeRunning" duration="30" durationUnit="min"
+          sourceName="Test Watch" startDate="2026-03-01 12:00:00 +0200" endDate="2026-03-01 12:30:00 +0200"/>
+ <Workout workoutActivityType="HKWorkoutActivityTypeRunning" duration="30" durationUnit="min"
+          sourceName="Test Watch" startDate="2026-03-01 14:00:00 +0200" endDate="2026-03-01 14:30:00 +0200"/>
+ <!-- exactly at the start: in -->
+ <Record type="HKQuantityTypeIdentifierHeartRate" sourceName="Test Watch" unit="count/min" value="100"
+         startDate="2026-03-01 12:00:00 +0200" endDate="2026-03-01 12:00:00 +0200"/>
+ <!-- a span inside: in -->
+ <Record type="HKQuantityTypeIdentifierHeartRate" sourceName="Test Watch" unit="count/min" value="150"
+         startDate="2026-03-01 12:10:00 +0200" endDate="2026-03-01 12:24:00 +0200"/>
+ <!-- stored without a value: left out -->
+ <Record type="HKQuantityTypeIdentifierHeartRate" sourceName="Test Watch" unit="count/min"
+         startDate="2026-03-01 12:20:00 +0200" endDate="2026-03-01 12:20:00 +0200"/>
+ <!-- the tail: heart rate, Apple's recovery figure, heart rate again: all in, by start -->
+ <Record type="HKQuantityTypeIdentifierHeartRate" sourceName="Test Watch" unit="count/min" value="130"
+         startDate="2026-03-01 12:31:00 +0200" endDate="2026-03-01 12:31:00 +0200"/>
+ <Record type="HKQuantityTypeIdentifierHeartRateRecoveryOneMinute" sourceName="Test Watch"
+         unit="count/min" value="25" startDate="2026-03-01 12:31:30 +0200" endDate="2026-03-01 12:31:30 +0200"/>
+ <Record type="HKQuantityTypeIdentifierHeartRate" sourceName="Test Watch" unit="count/min" value="120"
+         startDate="2026-03-01 12:33:00 +0200" endDate="2026-03-01 12:33:00 +0200"/>
+ <!-- exactly at end + 5 min: in -->
+ <Record type="HKQuantityTypeIdentifierHeartRate" sourceName="Test Watch" unit="count/min" value="110"
+         startDate="2026-03-01 12:35:00 +0200" endDate="2026-03-01 12:35:00 +0200"/>
+ <!-- inside the other workout: not this one's -->
+ <Record type="HKQuantityTypeIdentifierHeartRate" sourceName="Test Watch" unit="count/min" value="160"
+         startDate="2026-03-01 14:10:00 +0200" endDate="2026-03-01 14:10:00 +0200"/>
+</HealthData>
+"""
+
+
+def _first_workout_and_db(tmp_path):
     export = tmp_path / "export.xml"
-    export.write_text(
-        '<?xml version="1.0" encoding="UTF-8"?>\n<!-- SYNTHETIC -->\n<HealthData>'
-        '<Workout workoutActivityType="HKWorkoutActivityTypeRunning" duration="30" '
-        'durationUnit="min" sourceName="Test Watch" '
-        'startDate="2026-03-01 10:00:00 +0000" endDate="2026-03-01 10:30:00 +0000"/>'
-        '<Workout workoutActivityType="HKWorkoutActivityTypeRunning" duration="30" '
-        'durationUnit="min" sourceName="Test Watch" '
-        'startDate="2026-03-01 12:00:00 +0000" endDate="2026-03-01 12:30:00 +0000"/>'
-        '<Record type="HKQuantityTypeIdentifierHeartRate" sourceName="Test Watch" '
-        'unit="count/min" value="150" '
-        'startDate="2026-03-01 10:10:00 +0000" endDate="2026-03-01 10:24:00 +0000"/>'
-        '<Record type="HKQuantityTypeIdentifierHeartRateRecoveryOneMinute" '
-        'sourceName="Test Watch" unit="count/min" value="25" '
-        'startDate="2026-03-01 10:32:58 +0000" endDate="2026-03-01 10:32:58 +0000"/>'
-        '<Record type="HKQuantityTypeIdentifierHeartRate" sourceName="Test Watch" '
-        'unit="count/min" value="130" '
-        'startDate="2026-03-01 10:31:00 +0000" endDate="2026-03-01 10:31:00 +0000"/>'
-        '<Record type="HKQuantityTypeIdentifierHeartRate" sourceName="Test Watch" '
-        'unit="count/min" value="160" '
-        'startDate="2026-03-01 12:10:00 +0000" endDate="2026-03-01 12:10:00 +0000"/>'
-        "</HealthData>",
-        encoding="utf-8",
-    )
+    export.write_text(_AROUND_EXPORT, encoding="utf-8")
     db = tmp_path / "health.sqlite"
     import_export(export, db)
     import_samples(export, db)
-
     conn = connect(db)
+    return conn, load_workouts(conn)[0]
+
+
+def test_readings_around_loads_the_window_and_its_tail_in_order(tmp_path):
+    """Through the database, from a +0200 export: readings from exactly the start to
+    exactly 5 minutes after the end come back typed and in start order, the recovery
+    figure between two heart-rate readings. The reading without a value and the one in
+    the other workout are left out."""
+    conn, first = _first_workout_and_db(tmp_path)
     try:
-        first = load_workouts(conn)[0]
         readings = readings_around(conn, first)
     finally:
         conn.close()
 
     at = datetime(2026, 3, 1, tzinfo=UTC)
     assert readings == [
+        _instant(at.replace(hour=10), 100.0),
         Reading(HEART_RATE, at.replace(hour=10, minute=10), at.replace(hour=10, minute=24), 150.0),
         _instant(at.replace(hour=10, minute=31), 130.0),
-        _instant(at.replace(hour=10, minute=32, second=58), 25.0, kind=HEART_RATE_RECOVERY),
+        _instant(at.replace(hour=10, minute=31, second=30), 25.0, kind=HEART_RATE_RECOVERY),
+        _instant(at.replace(hour=10, minute=33), 120.0),
+        _instant(at.replace(hour=10, minute=35), 110.0),
     ]
+
+
+def test_readings_around_takes_its_bounds_in_utc_whatever_the_workouts_offset(tmp_path):
+    """The same workout with its times shown at +0200 selects the same readings: the
+    bounds are compared with stored UTC strings, so they are converted first."""
+    conn, first = _first_workout_and_db(tmp_path)
+    sast = timezone(timedelta(hours=2))
+    shown_locally = replace(
+        first, start=first.start.astimezone(sast), end=first.end.astimezone(sast)
+    )
+    try:
+        assert readings_around(conn, shown_locally) == readings_around(conn, first)
+    finally:
+        conn.close()
+
+
+def test_a_non_numeric_stored_value_raises_without_quoting_it(tmp_path):
+    """A value that is not a number stops the read with MalformedRecordError, whose
+    rendered traceback names the type but not the raw value Python's error would quote."""
+    conn, first = _first_workout_and_db(tmp_path)
+    try:
+        upsert_samples(
+            conn,
+            [
+                Sample(
+                    type=HEART_RATE,
+                    start=first.start + timedelta(minutes=5),
+                    value="72,5",
+                    unit="count/min",
+                    source_name="Test Watch",
+                    workout_id=first.id,
+                )
+            ],
+        )
+        with pytest.raises(MalformedRecordError) as caught:
+            readings_around(conn, first)
+    finally:
+        conn.close()
+
+    rendered = "".join(traceback.format_exception(caught.value))
+    assert HEART_RATE in rendered
+    assert "72,5" not in rendered

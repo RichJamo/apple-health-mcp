@@ -131,17 +131,17 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS workouts (
-            id                  TEXT PRIMARY KEY,
-            activity_type       TEXT NOT NULL,
-            start_utc           TEXT NOT NULL,
-            end_utc             TEXT NOT NULL,
-            duration_s          REAL,
-            active_energy_kcal  REAL,
+            id                      TEXT PRIMARY KEY,
+            activity_type           TEXT NOT NULL,
+            start_utc               TEXT NOT NULL,
+            end_utc                 TEXT NOT NULL,
+            duration_s              REAL,
+            active_energy_kcal      REAL,
             heart_rate_average_bpm  REAL,
             heart_rate_maximum_bpm  REAL,
-            source_name         TEXT NOT NULL,
-            tz                  TEXT NOT NULL,
-            raw_metadata        TEXT NOT NULL
+            source_name             TEXT NOT NULL,
+            tz                      TEXT NOT NULL,
+            raw_metadata            TEXT NOT NULL
         )
         """
     )

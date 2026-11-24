@@ -82,9 +82,10 @@ data-free schema):
    Apple's `WorkoutStatistics` of type `HeartRate` (average, maximum) exists only on
    workouts from late 2022 on, about half the sessions. Inside a workout Apple mostly
    stores heart rate as *spans*: one value covering several minutes, which is the
-   average over that stretch (a span-weighted mean matches Apple's average to within
-   about 1 bpm). So average heart rate falls back to that weighted mean when the
-   statistic is absent, but peak heart rate comes **only** from the statistic: the
+   average over that stretch: on sessions that have Apple's average, a span-weighted
+   mean is a median 0.3 bpm away from it. So average heart rate falls back to that
+   weighted mean when the statistic is absent (on older sessions, where it cannot be
+   checked against Apple's figure), but peak heart rate comes **only** from the statistic: the
    highest span reads well below Apple's maximum. The parser stores average and
    maximum on the workout (schema version 2).
 3. **Timestamps carry their UTC offset** (e.g. `+0200`) plus an `HKTimeZone`
@@ -114,7 +115,8 @@ later. Two independent sources:
   background after a workout ends. "Heart rate at the end" is usually not measurable,
   because the last minutes inside the workout are a span. So measured recovery is
   Apple's maximum minus the instant reading nearest one minute after the end (within
-  15 s either side). It exists for about half the sessions, those with Apple's maximum.
+  15 s either side): the drop from the session's peak, which equals a true one-minute
+  recovery only when the peak came at the end. It exists for about half the sessions, those with Apple's maximum.
   If a workout is ended a while after the effort stopped, heart rate was already
   falling, so the figure covers more than a minute of recovery and reads high.
 
@@ -161,7 +163,8 @@ feedback decoupled from Apple's schema.
 
 - **`workouts`** — `id` (stable hash of source key), `source_uuid`, `type`,
   `start_utc`, `end_utc`, `duration_s`, `tz`, `active_energy_kcal`
-  (from WorkoutStatistics), `source_name`, `raw_metadata` (JSON).
+  (from WorkoutStatistics), `heart_rate_average_bpm` and `heart_rate_maximum_bpm`
+  (Apple's statistic, NULL when absent), `source_name`, `raw_metadata` (JSON).
 - **`samples`** — time-series: `type`, `start_utc`, `end_utc` (equal to `start_utc`
   for an instant reading, later for a span), `value`, `unit`, `source_name`, nullable
   `workout_id`. Indexed on `(type, start_utc)`.
