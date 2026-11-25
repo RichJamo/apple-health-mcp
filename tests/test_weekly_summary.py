@@ -1,6 +1,6 @@
-"""Tests for the weekly training summary (step 4): the spec Rich implements against.
+"""Tests for the weekly training summary (step 4).
 
-Three functions in analyze.py, in the order to build them:
+Three functions in analyze.py, each built on the one before:
   1. local_start(workout)       — a workout's start in the zone it was recorded in.
   2. weekly_summary(sessions)   — one WeekSummary per Monday-to-Sunday local week.
   3. weekly_summary_from_db(conn) — the same, from the database, counting a session
@@ -186,14 +186,20 @@ def test_minutes_are_apples_duration_not_the_recorded_span():
 
 
 def test_result_does_not_depend_on_input_order():
+    """Every order of the same sessions gives the same summary, down to the order of
+    the types in sessions_by_type (dict equality ignores key order; a report does not)."""
     sessions = [_session(_utc(d, 6), kind=k) for d, k in [(2, RUN), (10, SURF), (3, SURF)]]
 
-    results = {
-        tuple((w.week_start, w.sessions) for w in weekly_summary(list(order)))
+    results = [
+        [(w, list(w.sessions_by_type)) for w in weekly_summary(list(order))]
         for order in itertools.permutations(sessions)
-    }
+    ]
 
-    assert results == {((date(2026, 3, 2), 2), (date(2026, 3, 9), 1))}
+    assert [(w.week_start, w.sessions) for w, _ in results[0]] == [
+        (date(2026, 3, 2), 2),
+        (date(2026, 3, 9), 1),
+    ]
+    assert all(result == results[0] for result in results)
 
 
 def test_weeks_are_consecutive_mondays_and_account_for_every_session():

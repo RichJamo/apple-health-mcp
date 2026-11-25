@@ -18,7 +18,7 @@ Public API:
 - ``Reading`` / ``readings_around(conn, w)`` -> a session's stored readings, typed
 - ``HeartRateSummary`` / ``heart_rate_summary(w, readings)`` -> its heart-rate figures
 - ``WeekSummary`` / ``weekly_summary(sessions)`` / ``weekly_summary_from_db(conn)``
-                                           -> training per local week (step 4)
+                                           -> training per local week
 
 Read-only: nothing here writes to the database.
 """
@@ -27,9 +27,11 @@ from __future__ import annotations
 
 import math
 import sqlite3
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, tzinfo
+from zoneinfo import ZoneInfo
 
 from apple_health_mcp.ingest import HEART_RATE, HEART_RATE_RECOVERY, RECOVERY_WINDOW
 from apple_health_mcp.parse import MalformedRecordError
@@ -356,11 +358,10 @@ def _average_from_readings(workout: StoredWorkout, heart_rate: list[Reading]) ->
     return sum(instants) / len(instants) if instants else None
 
 
-# --- Weekly training summary (step 4) ---------------------------------------------------
+# --- Weekly training summary ------------------------------------------------------------
 #
-# Rich implements these three against tests/test_weekly_summary.py, in this order. Each
-# docstring is the contract: preconditions, what it returns, and the invariants the
-# tests check. Delete the NotImplementedError line once the body is written.
+# Weeks run Monday to Sunday in the zone each session was recorded in, because a
+# Monday 00:30 run in Johannesburg is Sunday 22:30 in UTC.
 
 
 @dataclass(frozen=True)
@@ -394,7 +395,16 @@ def local_start(workout: StoredWorkout) -> datetime:
     Postcondition: the result is the same moment as ``workout.start`` (equal when
     compared), only with the local offset, so ``.date()`` gives the local calendar day.
     """
-    raise NotImplementedError("step 4: implement against tests/test_weekly_summary.py")
+    return workout.start.astimezone(_recorded_zone(workout.tz))
+
+
+def _recorded_zone(tz: str) -> tzinfo:
+    """The zone a stored ``tz`` value names. When the export had no HKTimeZone, the
+    importer wrote the offset with ``strftime("%z")``, so it is read back with
+    ``strptime("%z")``. A zone name never starts with a sign."""
+    if tz.startswith(("+", "-")):
+        return datetime.strptime(tz, "%z").tzinfo
+    return ZoneInfo(tz)
 
 
 def weekly_summary(sessions: Iterable[StoredWorkout]) -> list[WeekSummary]:
@@ -413,7 +423,43 @@ def weekly_summary(sessions: Iterable[StoredWorkout]) -> list[WeekSummary]:
     - the ``sessions`` counts add up to the number of input sessions;
     - the result does not depend on the input's order.
     """
-    raise NotImplementedError("step 4: implement against tests/test_weekly_summary.py")
+    # Sorting first makes the output identical whatever order the caller used, down to
+    # the order of the keys in sessions_by_type, which a report prints.
+    sessions_by_week: dict[date, list[StoredWorkout]] = defaultdict(list)
+    for session in sorted(sessions, key=lambda s: (s.start, s.id)):
+        sessions_by_week[_monday_of(local_start(session).date())].append(session)
+    if not sessions_by_week:
+        return []
+
+    weeks = []
+    week, last_week = min(sessions_by_week), max(sessions_by_week)
+    while week <= last_week:
+        weeks.append(_summarise_week(week, sessions_by_week.get(week, [])))
+        week += timedelta(days=7)
+    return weeks
+
+
+def _monday_of(day: date) -> date:
+    """The Monday on or before ``day``. ``weekday()`` is 0 on Monday, 6 on Sunday."""
+    return day - timedelta(days=day.weekday())
+
+
+def _summarise_week(week_start: date, sessions: list[StoredWorkout]) -> WeekSummary:
+    """One week's figures from the sessions that started in it (empty for a gap week)."""
+    known_energy = [s.active_energy_kcal for s in sessions if s.active_energy_kcal is not None]
+    return WeekSummary(
+        week_start=week_start,
+        sessions=len(sessions),
+        minutes=sum((_session_minutes(s) for s in sessions), start=0.0),
+        active_energy_kcal=sum(known_energy) if known_energy else None,
+        sessions_by_type=dict(Counter(s.activity_type for s in sessions)),
+    )
+
+
+def _session_minutes(session: StoredWorkout) -> float:
+    """Apple's duration (pauses left out), else the recorded span from start to end."""
+    seconds = session.duration_s if session.duration_s is not None else session.recorded_seconds
+    return seconds / 60
 
 
 def weekly_summary_from_db(conn: sqlite3.Connection) -> list[WeekSummary]:
@@ -423,4 +469,5 @@ def weekly_summary_from_db(conn: sqlite3.Connection) -> list[WeekSummary]:
     both records, so this starts from ``distinct_sessions`` (with the heart-rate
     counts it needs), never from the table's rows directly.
     """
-    raise NotImplementedError("step 4: implement against tests/test_weekly_summary.py")
+    sessions = distinct_sessions(load_workouts(conn), heart_rate_counts_by_source(conn))
+    return weekly_summary(sessions)
