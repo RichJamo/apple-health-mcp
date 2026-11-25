@@ -1,7 +1,7 @@
 """Tests for the weekly training summary (step 4).
 
 Three functions in analyze.py, each built on the one before:
-  1. local_start(workout)       — a workout's start in the zone it was recorded in.
+  1. local_start(workout)       — a workout's start in its stored zone.
   2. weekly_summary(sessions)   — one WeekSummary per Monday-to-Sunday local week.
   3. weekly_summary_from_db(conn) — the same, from the database, counting a session
      recorded by two sources once.
@@ -45,8 +45,9 @@ def _session(
     energy: float | None = 300.0,
     duration_minutes: float | None = None,
 ) -> StoredWorkout:
-    """A session ``minutes`` long from ``start_utc``. ``duration_minutes`` is Apple's
-    duration (pauses left out); it defaults to the whole recorded time."""
+    """A session ``minutes`` long from ``start_utc``. ``duration_minutes`` is the
+    recorded duration, which on a Watch workout leaves pauses out; it defaults to the
+    whole recorded time."""
     duration = minutes if duration_minutes is None else duration_minutes
     return StoredWorkout(
         id=f"w{next(_ids)}",
@@ -192,7 +193,7 @@ def test_energy_adds_the_known_figures_and_is_absent_when_none_is_known():
 
 
 def test_minutes_are_apples_duration_not_the_recorded_span():
-    """A 60-minute recording with 15 minutes paused has Apple's duration of 45
+    """A 60-minute Watch recording with 15 minutes paused has a duration of 45
     minutes; the summary counts 45. With no duration stored, the recorded span is used."""
     paused = _session(_utc(2, 6), 60, duration_minutes=45)
     no_duration = replace(_session(_utc(3, 6), 20), duration_s=None)

@@ -48,9 +48,10 @@ class StoredWorkout:
 
     Invariants:
     - ``start`` and ``end`` are timezone-aware datetimes in UTC.
-    - ``tz`` is the zone it was recorded in: an IANA name such as
-      "Africa/Johannesburg", or an offset such as "+0200" when the export gave none.
-      It is what places a workout in a local day or week.
+    - ``tz`` is the export's HKTimeZone, the zone it was recorded in, such as
+      "Africa/Johannesburg"; or, when the export gave none, the offset in its
+      startDate, such as "+0200", which is the exporting phone's offset (see
+      ``local_start``). It is what places a workout in a local day or week.
     - ``duration_s`` and ``active_energy_kcal`` may be ``None``, as in the table.
     - ``heart_rate_average_bpm`` and ``heart_rate_maximum_bpm`` are Apple's own
       figures for the whole workout, or ``None`` when the export had none.
@@ -360,8 +361,8 @@ def _average_from_readings(workout: StoredWorkout, heart_rate: list[Reading]) ->
 
 # --- Weekly training summary ------------------------------------------------------------
 #
-# Weeks run Monday to Sunday in the zone each session was recorded in, because a
-# Monday 00:30 run in Johannesburg is Sunday 22:30 in UTC.
+# Weeks run Monday to Sunday in each session's local time (``local_start`` says what
+# "local" can mean), because a Monday 00:30 run in Johannesburg is Sunday 22:30 in UTC.
 
 
 @dataclass(frozen=True)
@@ -370,8 +371,9 @@ class WeekSummary:
 
     - ``week_start``: the Monday that starts the week, as a local calendar date.
     - ``sessions``: how many sessions started in the week (0 for an empty week).
-    - ``minutes``: the sessions' durations added up, from ``duration_s`` (Apple's
-      duration, which leaves pauses out), or from start to end when that is ``None``.
+    - ``minutes``: the sessions' durations added up, from ``duration_s`` (the
+      duration its source recorded, which leaves pauses out on Apple Watch workouts),
+      or from start to end when that is ``None``.
     - ``active_energy_kcal``: the known energy figures added up; ``None`` when no
       session in the week has one, which includes a week with no sessions.
     - ``sessions_by_type``: sessions per ``activity_type``; its counts add up to
@@ -386,11 +388,16 @@ class WeekSummary:
 
 
 def local_start(workout: StoredWorkout) -> datetime:
-    """``workout.start`` shown in the zone the workout was recorded in.
+    """``workout.start`` shown in the zone that ``workout.tz`` names.
 
-    ``workout.tz`` is either a zone name that ``zoneinfo.ZoneInfo`` accepts (such as
-    "Africa/Johannesburg") or a bare offset of the form "+HHMM" / "-HHMM" (such as
-    "+0200" or "-0500"), which ``datetime.timezone`` can represent.
+    ``workout.tz`` is one of two things:
+    - a zone name that ``zoneinfo.ZoneInfo`` accepts, such as "Africa/Johannesburg":
+      the export's HKTimeZone, the zone the workout was recorded in;
+    - an offset of the form "+HHMM" / "-HHMM", such as "+0200", when the export had
+      no HKTimeZone. Apple writes every date in the zone the phone was in when the
+      export was made, so this is the exporting phone's offset. For a workout
+      recorded in another zone it is not the recording zone, and the export holds
+      nothing better (docs/architecture.md, data fact 3).
 
     Postcondition: the result is the same moment as ``workout.start`` (equal when
     compared), only with the local offset, so ``.date()`` gives the local calendar day.
@@ -472,7 +479,8 @@ def _summarise_week(week_start: date, sessions: list[StoredWorkout]) -> WeekSumm
 
 
 def _session_minutes(session: StoredWorkout) -> float:
-    """Apple's duration (pauses left out), else the recorded span from start to end."""
+    """The duration its source recorded (pauses left out on Apple Watch workouts),
+    else the recorded span from start to end."""
     seconds = session.duration_s if session.duration_s is not None else session.recorded_seconds
     return seconds / 60
 

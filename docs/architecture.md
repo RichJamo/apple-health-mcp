@@ -90,11 +90,21 @@ data-free schema):
    maximum on the workout (schema version 2).
 3. **Timestamps carry their UTC offset** (e.g. `+0200`) plus an `HKTimeZone`
    metadata entry. Store UTC and the original zone; never discard the offset.
+   The offset is the exporting phone's, not the recording zone's: on the real
+   export, every workout whose `HKTimeZone` had a different offset still carried the
+   phone's offset in its `startDate`. So `HKTimeZone` is the only record of where a
+   workout was recorded. About a fifth of workouts have none; their `tz` is the
+   phone's offset at export, and an export made in another zone would shift their
+   local times.
 4. **Apple duplicates some `MetadataEntry` lines.** De-dupe by key.
 5. **Strength is logged as HIIT.** Rich records home dumbbell strength as
    `HighIntensityIntervalTraining`, same bucket as cardio HIIT. The workout *type*
    can't separate them; the `workout_feedback` layer (limiter = muscular vs cardio,
    weights noted) is how we'll distinguish them later.
+6. **Duration leaves pauses out on Watch workouts only.** On the real export, every
+   Watch workout whose `duration` is more than a minute short of end minus start has
+   pause events, and none is short without them. Other sources' durations match end
+   minus start.
 
 ### Available for later (noted, not built yet)
 
