@@ -90,21 +90,26 @@ data-free schema):
    maximum on the workout (schema version 2).
 3. **Timestamps carry their UTC offset** (e.g. `+0200`) plus an `HKTimeZone`
    metadata entry. Store UTC and the original zone; never discard the offset.
-   The offset is the exporting phone's, not the recording zone's: on the real
-   export, every workout whose `HKTimeZone` had a different offset still carried the
-   phone's offset in its `startDate`. So `HKTimeZone` is the only record of where a
-   workout was recorded. About a fifth of workouts have none; their `tz` is the
-   phone's offset at export, and an export made in another zone would shift their
-   local times.
+   The offset comes from the exporting phone's zone, not the recording zone: on the
+   real export, all of the two dozen or so workouts whose `HKTimeZone` had a
+   different offset still carried the offset of the phone's zone in their
+   `startDate`. So `HKTimeZone` is the only record of where a workout was recorded.
+   About a fifth of workouts have none; their `tz` comes from the phone's zone at
+   export, and an export made in another zone would shift their local times. (That
+   phone's zone has no daylight saving, so the probe cannot say whether a zone that
+   has it gives each workout that zone's offset on the workout's date or one offset
+   for the whole export.)
 4. **Apple duplicates some `MetadataEntry` lines.** De-dupe by key.
 5. **Strength is logged as HIIT.** Rich records home dumbbell strength as
    `HighIntensityIntervalTraining`, same bucket as cardio HIIT. The workout *type*
    can't separate them; the `workout_feedback` layer (limiter = muscular vs cardio,
    weights noted) is how we'll distinguish them later.
-6. **Duration leaves pauses out on Watch workouts only.** On the real export, every
-   Watch workout whose `duration` is more than a minute short of end minus start has
-   pause events, and none is short without them. Other sources' durations match end
-   minus start.
+6. **Duration leaves pauses out on Watch workouts.** On the real export, every Watch
+   workout whose `duration` is more than a minute short of end minus start has pause
+   events, and about three quarters of the Watch workouts with pause events are that
+   short (the rest are within a minute of it). No other source recorded a pause
+   event, and their durations match end minus start, so whether they would leave
+   pauses out is unknown.
 
 ### Available for later (noted, not built yet)
 

@@ -50,7 +50,7 @@ class StoredWorkout:
     - ``start`` and ``end`` are timezone-aware datetimes in UTC.
     - ``tz`` is the export's HKTimeZone, the zone it was recorded in, such as
       "Africa/Johannesburg"; or, when the export gave none, the offset in its
-      startDate, such as "+0200", which is the exporting phone's offset (see
+      startDate, such as "+0200", which comes from the exporting phone's zone (see
       ``local_start``). It is what places a workout in a local day or week.
     - ``duration_s`` and ``active_energy_kcal`` may be ``None``, as in the table.
     - ``heart_rate_average_bpm`` and ``heart_rate_maximum_bpm`` are Apple's own
@@ -71,7 +71,7 @@ class StoredWorkout:
     @property
     def recorded_seconds(self) -> float:
         """Seconds from start to end. Unlike ``duration_s``, never ``None``, and it
-        includes any pauses, which is what overlap with another record is measured in."""
+        always includes any pauses, which is what overlap with another record is measured in."""
         return (self.end - self.start).total_seconds()
 
 
@@ -395,9 +395,9 @@ def local_start(workout: StoredWorkout) -> datetime:
       the export's HKTimeZone, the zone the workout was recorded in;
     - an offset of the form "+HHMM" / "-HHMM", such as "+0200", when the export had
       no HKTimeZone. Apple writes every date in the zone the phone was in when the
-      export was made, so this is the exporting phone's offset. For a workout
-      recorded in another zone it is not the recording zone, and the export holds
-      nothing better (docs/architecture.md, data fact 3).
+      export was made, so this offset comes from the exporting phone's zone, not the
+      recording zone. For a workout recorded in another zone the two differ, and the
+      export holds nothing better (docs/architecture.md, data fact 3).
 
     Postcondition: the result is the same moment as ``workout.start`` (equal when
     compared), only with the local offset, so ``.date()`` gives the local calendar day.

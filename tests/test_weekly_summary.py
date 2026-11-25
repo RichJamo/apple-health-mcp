@@ -210,7 +210,7 @@ def test_energy_adds_the_known_figures_and_is_absent_when_none_is_known():
     assert [w.active_energy_kcal for w in weeks] == [300.0, None, 0.0]
 
 
-def test_minutes_are_apples_duration_not_the_recorded_span():
+def test_minutes_are_the_recorded_duration_not_the_span():
     """A 60-minute Watch recording with 15 minutes paused has a duration of 45
     minutes; the summary counts 45. With no duration stored, the recorded span is used.
     A stored duration of 0 counts as 0, not as missing."""
@@ -338,3 +338,22 @@ def test_from_the_database_a_workout_without_a_zone_name_uses_its_stored_offset(
         (date(2026, 3, 2), 1),
         (date(2026, 3, 9), 1),
     ]
+
+
+def test_from_the_database_an_unrecognised_zone_stops_the_summary(tmp_path):
+    """A stored zone name this machine cannot load stops the whole summary with
+    MalformedRecordError. Skipping the session instead would make the weekly counts
+    quietly stop adding up to the stored sessions, so failing is the documented
+    choice, and this pins it through the real import."""
+    export = _NO_ZONE_NAME_EXPORT.replace(
+        'endDate="2026-03-08 23:50:00 +0200"/>',
+        'endDate="2026-03-08 23:50:00 +0200">\n'
+        '  <MetadataEntry key="HKTimeZone" value="GMT+0200"/>\n </Workout>',
+    )
+    assert export.count("GMT+0200") == 1
+    conn = connect(_import(tmp_path, export))
+    try:
+        with pytest.raises(MalformedRecordError):
+            weekly_summary_from_db(conn)
+    finally:
+        conn.close()
