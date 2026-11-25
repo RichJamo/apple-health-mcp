@@ -31,7 +31,7 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta, tzinfo
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apple_health_mcp.ingest import HEART_RATE, HEART_RATE_RECOVERY, RECOVERY_WINDOW
 from apple_health_mcp.parse import MalformedRecordError
@@ -394,8 +394,20 @@ def local_start(workout: StoredWorkout) -> datetime:
 
     Postcondition: the result is the same moment as ``workout.start`` (equal when
     compared), only with the local offset, so ``.date()`` gives the local calendar day.
+
+    Raises ``MalformedRecordError`` when ``tz`` is neither a zone this machine's time
+    zone database knows nor a "+HHMM" offset. The importer stores HKTimeZone as the
+    export gives it, so any app could have written it. The message names the
+    workout's id, not the value, and is raised outside the ``except`` block, as in
+    ``_stored_bpm``.
     """
-    return workout.start.astimezone(_recorded_zone(workout.tz))
+    try:
+        zone = _recorded_zone(workout.tz)
+    except (ZoneInfoNotFoundError, ValueError):
+        zone = None  # handled below, outside the except block
+    if zone is None:
+        raise MalformedRecordError(f"unrecognised time zone on stored workout {workout.id}")
+    return workout.start.astimezone(zone)
 
 
 def _recorded_zone(tz: str) -> tzinfo:
@@ -422,6 +434,9 @@ def weekly_summary(sessions: Iterable[StoredWorkout]) -> list[WeekSummary]:
       weeks with no session in between are included, so gaps show in a trend;
     - the ``sessions`` counts add up to the number of input sessions;
     - the result does not depend on the input's order.
+
+    Raises ``MalformedRecordError`` (from ``local_start``) when a session's time zone
+    cannot be loaded.
     """
     # Sorting first makes the output identical whatever order the caller used, down to
     # the order of the keys in sessions_by_type, which a report prints.
@@ -468,6 +483,8 @@ def weekly_summary_from_db(conn: sqlite3.Connection) -> list[WeekSummary]:
     It must count a session recorded by two sources once: the workouts table keeps
     both records, so this starts from ``distinct_sessions`` (with the heart-rate
     counts it needs), never from the table's rows directly.
+
+    Raises ``MalformedRecordError`` as ``weekly_summary`` does.
     """
     sessions = distinct_sessions(load_workouts(conn), heart_rate_counts_by_source(conn))
     return weekly_summary(sessions)

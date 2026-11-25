@@ -27,6 +27,7 @@ from apple_health_mcp.analyze import (
 )
 from apple_health_mcp.db import connect
 from apple_health_mcp.ingest import import_export, import_samples
+from apple_health_mcp.parse import MalformedRecordError
 
 JOBURG = "Africa/Johannesburg"  # UTC+2 all year, no daylight saving
 RUN = "HKWorkoutActivityTypeRunning"
@@ -92,6 +93,22 @@ def test_local_start_accepts_a_bare_offset(tz, offset):
 
     assert start.utcoffset() == offset
     assert start == _utc(1, 22, 30)  # the same moment, only shown in another zone
+
+
+@pytest.mark.parametrize("tz", ["Mars/Olympus_Mons", "GMT+0200", "+02x0", "/etc/localtime"])
+def test_an_unrecognised_zone_is_refused_without_quoting_it(tz):
+    """The importer stores HKTimeZone as the export gives it, so an app could have
+    written "GMT+0200", and a zone newer than this machine's database fails the same
+    way. The error names the workout, not the value, and carries no error that does."""
+    workout = _session(_utc(1, 22, 30), tz=tz)
+
+    with pytest.raises(MalformedRecordError) as caught:
+        local_start(workout)
+
+    assert workout.id in str(caught.value)
+    assert tz not in str(caught.value)
+    assert caught.value.__context__ is None
+    assert caught.value.__cause__ is None
 
 
 # --- 2. weekly_summary ----------------------------------------------------------------
