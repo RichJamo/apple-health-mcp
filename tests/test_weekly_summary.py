@@ -153,6 +153,23 @@ def test_weeks_are_split_at_local_midnight_not_utc():
     ]
 
 
+@pytest.mark.parametrize(
+    ("start_utc", "week_start"),
+    [
+        (datetime(2026, 7, 5, 23, 30, tzinfo=UTC), date(2026, 7, 6)),  # Mon 00:30 BST
+        (datetime(2026, 1, 4, 23, 30, tzinfo=UTC), date(2025, 12, 29)),  # Sun 23:30 GMT
+    ],
+)
+def test_a_named_zone_follows_daylight_saving(start_utc, week_start):
+    """Sunday 23:30 UTC is Monday 00:30 in London in July (BST, UTC+1), so it falls in
+    the next week; in January it is still Sunday 23:30 (GMT), so the same week.
+    Johannesburg alone cannot catch a version that reads a zone name as one fixed
+    offset all year."""
+    (week,) = weekly_summary([_session(start_utc, tz="Europe/London")])
+
+    assert week.week_start == week_start
+
+
 def test_a_session_belongs_to_the_week_of_its_start():
     """A session that starts Sunday 23:00 local and runs past midnight counts in the
     week it started in."""
@@ -180,27 +197,30 @@ def test_empty_weeks_between_sessions_are_included():
 def test_energy_adds_the_known_figures_and_is_absent_when_none_is_known():
     """A Yoga-like session has no energy figure. In a week with one known and one
     unknown, the total is the known one; in a week with only unknowns, it is None,
-    not 0, which would read as a measured zero."""
+    not 0, which would read as a measured zero. A measured zero stays 0.0."""
     weeks = weekly_summary(
         [
             _session(_utc(2, 6), energy=300.0),
             _session(_utc(3, 6), energy=None),
             _session(_utc(9, 6), energy=None),
+            _session(_utc(16, 6), energy=0.0),
         ]
     )
 
-    assert [w.active_energy_kcal for w in weeks] == [300.0, None]
+    assert [w.active_energy_kcal for w in weeks] == [300.0, None, 0.0]
 
 
 def test_minutes_are_apples_duration_not_the_recorded_span():
     """A 60-minute Watch recording with 15 minutes paused has a duration of 45
-    minutes; the summary counts 45. With no duration stored, the recorded span is used."""
+    minutes; the summary counts 45. With no duration stored, the recorded span is used.
+    A stored duration of 0 counts as 0, not as missing."""
     paused = _session(_utc(2, 6), 60, duration_minutes=45)
     no_duration = replace(_session(_utc(3, 6), 20), duration_s=None)
+    zero_duration = _session(_utc(4, 6), 10, duration_minutes=0)
 
-    (week,) = weekly_summary([paused, no_duration])
+    (week,) = weekly_summary([paused, no_duration, zero_duration])
 
-    assert week.minutes == 45.0 + 20.0
+    assert week.minutes == 45.0 + 20.0 + 0.0
 
 
 def test_result_does_not_depend_on_input_order():
@@ -242,10 +262,12 @@ def test_weeks_are_consecutive_mondays_and_account_for_every_session():
 
 # One surf session recorded by a surf app and by the Watch, plus a run two days
 # later. Only the Watch writes heart rate. The summary must show 2 sessions, not 3.
+# The app filed the surf under "Other", starts first and is as long as the Watch's
+# record, so it would win the tie-break: only the heart-rate counts pick the Watch's.
 _TWICE_RECORDED_EXPORT = """<?xml version="1.0" encoding="UTF-8"?>
 <!-- SYNTHETIC: one session recorded by two sources, and one other session. -->
 <HealthData>
- <Workout workoutActivityType="HKWorkoutActivityTypeSurfingSports" duration="60" durationUnit="min"
+ <Workout workoutActivityType="HKWorkoutActivityTypeOther" duration="60" durationUnit="min"
           sourceName="Surf App" startDate="2026-03-02 07:00:00 +0200" endDate="2026-03-02 08:00:00 +0200">
   <MetadataEntry key="HKTimeZone" value="Africa/Johannesburg"/>
  </Workout>
@@ -262,18 +284,35 @@ _TWICE_RECORDED_EXPORT = """<?xml version="1.0" encoding="UTF-8"?>
 </HealthData>
 """
 
+# Two runs with no HKTimeZone, on either side of local midnight at +0200. Both start
+# on Sunday 8 March in UTC (21:30 and 22:30).
+_NO_ZONE_NAME_EXPORT = """<?xml version="1.0" encoding="UTF-8"?>
+<!-- SYNTHETIC: workouts without an HKTimeZone entry. -->
+<HealthData>
+ <Workout workoutActivityType="HKWorkoutActivityTypeRunning" duration="20" durationUnit="min"
+          sourceName="Test Watch" startDate="2026-03-08 23:30:00 +0200" endDate="2026-03-08 23:50:00 +0200"/>
+ <Workout workoutActivityType="HKWorkoutActivityTypeRunning" duration="20" durationUnit="min"
+          sourceName="Test Watch" startDate="2026-03-09 00:30:00 +0200" endDate="2026-03-09 00:50:00 +0200"/>
+</HealthData>
+"""
 
-def test_from_the_database_a_twice_recorded_session_counts_once(tmp_path):
-    """Through the real import: the workouts table holds 3 rows, but the week shows 2
-    sessions and 90 minutes. A summary that read the table without distinct_sessions
-    would show 3 sessions and 150 minutes, and fail here."""
+
+def _import(tmp_path, export_text: str):
+    """Run the real import on ``export_text`` and return the database path."""
     export = tmp_path / "export.xml"
-    export.write_text(_TWICE_RECORDED_EXPORT, encoding="utf-8")
+    export.write_text(export_text, encoding="utf-8")
     db = tmp_path / "health.sqlite"
     import_export(export, db)
     import_samples(export, db)
+    return db
 
-    conn = connect(db)
+
+def test_from_the_database_a_twice_recorded_session_counts_once(tmp_path):
+    """Through the real import: the workouts table holds 3 rows, but the week shows 2
+    sessions and 90 minutes, and the surf counts as the Watch's type. A summary that
+    read the table without distinct_sessions would show 3 sessions and 150 minutes;
+    one that left out the heart-rate counts would keep the app's "Other"."""
+    conn = connect(_import(tmp_path, _TWICE_RECORDED_EXPORT))
     try:
         assert conn.execute("SELECT COUNT(*) FROM workouts").fetchone()[0] == 3
         weeks = weekly_summary_from_db(conn)
@@ -282,3 +321,20 @@ def test_from_the_database_a_twice_recorded_session_counts_once(tmp_path):
 
     assert [(w.week_start, w.sessions, w.minutes) for w in weeks] == [(date(2026, 3, 2), 2, 90.0)]
     assert weeks[0].sessions_by_type == {SURF: 1, RUN: 1}
+
+
+def test_from_the_database_a_workout_without_a_zone_name_uses_its_stored_offset(tmp_path):
+    """With no HKTimeZone the importer stores the startDate offset ("+0200"), and the
+    summary reads that back. The two runs are both on Sunday in UTC, so they fall in
+    two weeks only if the stored offset is read the way it was written."""
+    conn = connect(_import(tmp_path, _NO_ZONE_NAME_EXPORT))
+    try:
+        assert conn.execute("SELECT DISTINCT tz FROM workouts").fetchall() == [("+0200",)]
+        weeks = weekly_summary_from_db(conn)
+    finally:
+        conn.close()
+
+    assert [(w.week_start, w.sessions) for w in weeks] == [
+        (date(2026, 3, 2), 1),
+        (date(2026, 3, 9), 1),
+    ]
