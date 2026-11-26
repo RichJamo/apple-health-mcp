@@ -199,8 +199,10 @@ def _row_values(workout: Workout) -> tuple:
     )
 
 
-# What ``zone_from_tz`` raises for a value that names no zone. Both quote the value.
-TZ_READ_ERRORS = (ZoneInfoNotFoundError, ValueError)
+# What ``zone_from_tz`` raises for a value that names no zone. All may quote the value.
+# OSError is there because, with the ``tzdata`` package installed (always the case on
+# Windows), a name that is a folder there ("America") raises IsADirectoryError.
+TZ_READ_ERRORS = (ZoneInfoNotFoundError, ValueError, OSError)
 
 
 def zone_from_tz(tz: str) -> tzinfo:

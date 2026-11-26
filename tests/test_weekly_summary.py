@@ -107,6 +107,7 @@ def test_an_unrecognised_zone_is_refused_without_quoting_it(tz):
         local_start(workout)
 
     assert workout.id in str(caught.value)
+    assert "import again" in str(caught.value)  # re-importing alone keeps the old row
     assert tz not in str(caught.value)
     assert caught.value.__context__ is None
     assert caught.value.__cause__ is None
@@ -343,10 +344,12 @@ def test_from_the_database_a_workout_without_a_zone_name_uses_its_stored_offset(
 def test_from_the_database_an_unloadable_zone_name_is_placed_by_its_offset(tmp_path):
     """An HKTimeZone this machine cannot load ("GMT+0200", as an app might write) is
     stored as the startDate offset instead, so the session is still counted, in the
-    week its offset gives, and the summary does not stop."""
+    week its offset gives, and the summary does not stop. The bad name is on the
+    Monday 00:30 run, which is still Sunday in UTC, so a fallback to UTC would put
+    both runs in one week."""
     export = _NO_ZONE_NAME_EXPORT.replace(
-        'endDate="2026-03-08 23:50:00 +0200"/>',
-        'endDate="2026-03-08 23:50:00 +0200">\n'
+        'endDate="2026-03-09 00:50:00 +0200"/>',
+        'endDate="2026-03-09 00:50:00 +0200">\n'
         '  <MetadataEntry key="HKTimeZone" value="GMT+0200"/>\n </Workout>',
     )
     assert export.count("GMT+0200") == 1

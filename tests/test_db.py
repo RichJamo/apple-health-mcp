@@ -119,3 +119,20 @@ def test_an_unloadable_zone_name_is_stored_as_the_start_offset(conn, name):
     tz, raw_metadata = conn.execute("SELECT tz, raw_metadata FROM workouts").fetchone()
     assert tz == "+0200"
     assert json.loads(raw_metadata) == {"HKTimeZone": name}
+
+
+def test_a_zone_lookup_that_fails_with_an_os_error_is_stored_as_the_offset(conn, monkeypatch):
+    """With the tzdata package installed (always so on Windows), a name that is a
+    folder in it, such as "America", makes ZoneInfo raise IsADirectoryError, not
+    ZoneInfoNotFoundError. The import must treat that name as unloadable too, not
+    stop. This machine has no tzdata, so the lookup is made to fail that way."""
+
+    def lookup_that_finds_a_folder(name):
+        raise IsADirectoryError(name)
+
+    monkeypatch.setattr("apple_health_mcp.db.ZoneInfo", lookup_that_finds_a_folder)
+    workout = replace(next(iter_workouts(FIXTURE)), metadata={"HKTimeZone": "America"})
+
+    upsert_workouts(conn, [workout])
+
+    assert conn.execute("SELECT tz FROM workouts").fetchone() == ("+0200",)
