@@ -4,9 +4,10 @@ Usage::
 
     uv run python -m apple_health_mcp.report [--db data/health.sqlite] [--weeks 12]
 
-One row per Monday-to-Sunday week, ending with the current week, so a recent break
-in training shows as empty weeks. "The current week" follows this computer's clock
-and time zone.
+One row per Monday-to-Sunday week, up to the current week, so a recent break in
+training shows as empty weeks. "The current week" follows this computer's clock and
+time zone. A session whose own local week is later (recorded in a zone ahead of this
+computer's, or with a wrong clock) is not dropped: the table then ends with its week.
 
 The output is the person's own training data. It stays in the terminal: don't paste
 it into an issue, a commit or a chat with an AI unless you mean to share it.
@@ -90,19 +91,41 @@ def _row(week: WeekSummary) -> tuple[str, str, str, str, str]:
 
 
 def _positive_int(text: str) -> int:
-    value = int(text)
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0  # refused below, with the same message
     if value < 1:
-        raise argparse.ArgumentTypeError("must be 1 or more")
+        raise argparse.ArgumentTypeError("must be a whole number, 1 or more")
     return value
 
 
+def _database_error_message(db: Path, sqlite_errorname: str) -> str:
+    """What to tell the person when SQLite refuses to read ``db``, by SQLite's error
+    name: only some of these errors mean the file is not a database."""
+    if sqlite_errorname.startswith("SQLITE_BUSY"):
+        return (
+            f"aborted: {db} is busy, probably because an import is writing to it. "
+            "Run the report again when the import has finished."
+        )
+    if sqlite_errorname == "SQLITE_READONLY_ROLLBACK":
+        return (
+            f"aborted: {db} was left part-written by an interrupted import. "
+            "Run the import again; it repairs the file and brings it up to date."
+        )
+    return f"aborted: {db} is not a database this tool can read"
+
+
 def main(argv: list[str] | None = None, *, today: Callable[[], date] = date.today) -> int:
-    """Print the last ``--weeks`` weeks, ending with the week that contains
-    ``today()``. ``today`` is there so tests can fix the date.
+    """Print the last ``--weeks`` weeks, up to the week that contains ``today()``
+    (or a later session's week; see the module docstring). ``today`` is there so
+    tests can fix the date.
 
     Returns 0 after printing, including "no workouts" for an empty database, and 1
-    when the database is missing, built by another version, not a database, or holds
-    a value it cannot read. Every error message names no raw health value.
+    when the database is missing, built by another version, busy, part-written, not
+    a database, or holds a value it cannot read. The messages it prints name no raw
+    health value. One case still escapes as a traceback that quotes a value: a
+    stored timestamp that does not parse (issue #3).
     """
     parser = argparse.ArgumentParser(
         prog="apple_health_mcp.report",
@@ -118,7 +141,7 @@ def main(argv: list[str] | None = None, *, today: Callable[[], date] = date.toda
         "--weeks",
         type=_positive_int,
         default=DEFAULT_WEEKS,
-        help=f"how many weeks to show, ending with this week (default: {DEFAULT_WEEKS})",
+        help=f"how many weeks to show, up to this week (default: {DEFAULT_WEEKS})",
     )
     args = parser.parse_args(argv)
 
@@ -139,8 +162,8 @@ def main(argv: list[str] | None = None, *, today: Callable[[], date] = date.toda
         # The message names only a record type or a stored row's id.
         print(f"aborted: {err}", file=sys.stderr)
         return 1
-    except sqlite3.DatabaseError:
-        print(f"aborted: {args.db} is not a database this tool can read", file=sys.stderr)
+    except sqlite3.DatabaseError as err:
+        print(_database_error_message(args.db, err.sqlite_errorname or ""), file=sys.stderr)
         return 1
 
     if not weeks:

@@ -12,7 +12,7 @@ import pytest
 from apple_health_mcp.analyze import WeekSummary
 from apple_health_mcp.db import connect
 from apple_health_mcp.ingest import import_export, import_samples
-from apple_health_mcp.report import activity_label, main, render
+from apple_health_mcp.report import _database_error_message, activity_label, main, render
 
 RUN = "HKWorkoutActivityTypeRunning"
 SURF = "HKWorkoutActivityTypeSurfingSports"
@@ -129,6 +129,16 @@ def test_main_prints_every_week_through_the_current_one(tmp_path, capsys):
     )
 
 
+def test_main_keeps_a_session_dated_after_the_current_week(tmp_path, capsys):
+    """A session can sit in a later local week than this computer's today (recorded
+    in a zone ahead of it, or with a wrong clock). It is not dropped: the table ends
+    with that session's week instead of the current one."""
+    assert main(["--db", str(_database(tmp_path))], today=lambda: date(2026, 3, 1)) == 0
+
+    rows = capsys.readouterr().out.splitlines()[1:]
+    assert [row.split()[0] for row in rows] == ["2026-03-02", "2026-03-09", "2026-03-16"]
+
+
 def test_main_weeks_option_keeps_the_most_recent_weeks(tmp_path, capsys):
     assert _report(_database(tmp_path), "--weeks", "2") == 0
 
@@ -136,12 +146,17 @@ def test_main_weeks_option_keeps_the_most_recent_weeks(tmp_path, capsys):
     assert [row.split()[0] for row in rows] == ["2026-03-16", "2026-03-23"]
 
 
-@pytest.mark.parametrize("weeks", ["0", "-3", "two"])
-def test_main_refuses_a_weeks_value_below_one(tmp_path, weeks):
+@pytest.mark.parametrize("weeks", ["0", "-3", "two", "1.5"])
+def test_main_refuses_a_weeks_value_that_is_not_a_whole_number_of_1_or_more(
+    tmp_path, capsys, weeks
+):
     with pytest.raises(SystemExit) as caught:
         _report(_database(tmp_path), "--weeks", weeks)
 
     assert caught.value.code == 2  # argparse's usage error
+    err = capsys.readouterr().err
+    assert "must be a whole number, 1 or more" in err
+    assert "_positive_int" not in err  # the message is for a person, not a traceback
 
 
 def test_main_does_not_change_the_database(tmp_path):
@@ -187,6 +202,27 @@ def test_main_refuses_a_file_that_is_not_a_database(tmp_path, capsys):
     assert _report(db) == 1
 
     assert "is not a database this tool can read" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("sqlite_errorname", "advice"),
+    [
+        ("SQLITE_BUSY", "Run the report again when the import has finished."),
+        ("SQLITE_BUSY_RECOVERY", "Run the report again when the import has finished."),
+        ("SQLITE_READONLY_ROLLBACK", "Run the import again; it repairs the file"),
+        ("SQLITE_NOTADB", "is not a database this tool can read"),
+        ("", "is not a database this tool can read"),
+    ],
+)
+def test_a_busy_or_part_written_database_is_not_called_not_a_database(
+    tmp_path, sqlite_errorname, advice
+):
+    """A busy database (an import holds the write lock) or a part-written one (an
+    import was killed) must not be described as "not a database", or the person may
+    delete a file that waiting, or importing again, would have fixed. These states
+    need a real lock held for SQLite's 5-second timeout, or a killed process, so the
+    choice of message is tested on its own."""
+    assert advice in _database_error_message(tmp_path / "health.sqlite", sqlite_errorname)
 
 
 def test_main_refuses_an_unreadable_stored_zone_without_quoting_it(tmp_path, capsys):
