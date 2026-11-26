@@ -19,6 +19,7 @@ Public API:
 - ``HeartRateSummary`` / ``heart_rate_summary(w, readings)`` -> its heart-rate figures
 - ``WeekSummary`` / ``weekly_summary(sessions)`` / ``weekly_summary_from_db(conn)``
                                            -> training per local week
+- ``pad_to_week_of(weeks, day)``            -> the same, with empty weeks up to ``day``
 
 Read-only: nothing here writes to the database.
 """
@@ -495,3 +496,32 @@ def weekly_summary_from_db(conn: sqlite3.Connection) -> list[WeekSummary]:
     """
     sessions = distinct_sessions(load_workouts(conn), heart_rate_counts_by_source(conn))
     return weekly_summary(sessions)
+
+
+def pad_to_week_of(weeks: list[WeekSummary], day: date) -> list[WeekSummary]:
+    """``weeks`` followed by an empty week for each week after the last one, up to and
+    including the week that contains ``day``.
+
+    ``weekly_summary`` stops at the last session's week, so a break in training up to
+    today would not show. Padding to today's week makes it show.
+
+    Preconditions: ``weeks`` is a ``weekly_summary`` result (consecutive Mondays,
+    oldest first), and ``day`` is a local calendar date, such as today.
+
+    Postconditions:
+    - the input weeks come first, unchanged, and every week is seven days after the
+      one before;
+    - when ``day`` falls after the last week, the result ends with ``day``'s week;
+    - when it falls in or before the last week (a session dated in the future),
+      the result is ``weeks`` as given: nothing is dropped;
+    - an empty ``weeks`` gives ``[]``, since with no sessions there is no first week.
+    """
+    padded = list(weeks)
+    if not padded:
+        return padded
+    last_week = _monday_of(day)
+    week = padded[-1].week_start + timedelta(days=7)
+    while week <= last_week:
+        padded.append(_summarise_week(week, []))
+        week += timedelta(days=7)
+    return padded

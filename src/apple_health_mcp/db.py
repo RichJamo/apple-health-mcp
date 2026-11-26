@@ -12,6 +12,8 @@ fields that identify the session), and the table's PRIMARY KEY plus
 
 Public API:
 - ``connect(path)``                 -> open a connection
+- ``connect_read_only(path)``       -> open an existing database for reading only, at
+  this code's schema version (for the report and the MCP server)
 - ``init_schema(conn)``             -> create tables if absent; refuses a database
   built at another version with ``SchemaVersionError`` (see ``SCHEMA_VERSION``)
 - ``workout_id(workout)``           -> the stable hash id
@@ -34,6 +36,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, tzinfo
 from os import PathLike
+from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apple_health_mcp.parse import Workout
@@ -105,6 +108,52 @@ def connect(path: str | PathLike[str]) -> sqlite3.Connection:
     ``path`` may be ``":memory:"`` for an ephemeral database, which the tests use.
     """
     return sqlite3.connect(path)
+
+
+def connect_read_only(path: str | PathLike[str]) -> sqlite3.Connection:
+    """Open the existing database at ``path`` for reading only.
+
+    For code that must never change the data, such as the report and the MCP server.
+
+    Postconditions:
+    - SQLite refuses every write to the database. ``mode=ro`` covers the main file
+      only, so attaching another database is also switched off: otherwise
+      ``ATTACH`` could reopen the same file read-write, or create a new file, and
+      ``VACUUM INTO`` could copy the whole database to any path. Temporary tables
+      still work; they live in memory or a temp file and vanish on close.
+    - What a connection can still change is its own view, until it closes: a temp
+      table or view named ``workouts`` hides the real one from later queries that
+      don't say ``main.workouts``, and ``PRAGMA locking_mode = EXCLUSIVE`` holds a
+      lock that makes an import wait. So never reuse one connection for SQL from
+      different callers: open one per call, as the report does once.
+    - A missing ``path`` is not created. (A database someone switched to WAL mode
+      with another tool still gets its ``-wal`` and ``-shm`` side files; this code
+      never turns WAL on.)
+
+    Raises:
+    - ``FileNotFoundError`` when nothing exists at ``path`` (``connect`` would
+      quietly create an empty database there);
+    - ``SchemaVersionError`` when the database is at another version than
+      ``SCHEMA_VERSION``. An empty file is at version 0, so it is refused too, with
+      the same remedy: import again;
+    - ``sqlite3.DatabaseError`` when the file is not a SQLite database, or SQLite
+      cannot read it (busy, or left mid-write by an interrupted import). The
+      connection is closed first in every case.
+    """
+    file = Path(path)
+    if not file.is_file():
+        raise FileNotFoundError(f"no database at {file}")
+    conn = sqlite3.connect(f"{file.resolve().as_uri()}?mode=ro", uri=True)
+    conn.setlimit(sqlite3.SQLITE_LIMIT_ATTACHED, 0)
+    try:
+        found = conn.execute("PRAGMA user_version").fetchone()[0]
+    except sqlite3.DatabaseError:
+        conn.close()
+        raise
+    if found != SCHEMA_VERSION:
+        conn.close()
+        raise SchemaVersionError(found, SCHEMA_VERSION)
+    return conn
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
