@@ -8,7 +8,8 @@ accumulated children) as we go. See ``docs/architecture.md`` for the data facts.
 Public API:
 - ``iter_workouts(source)``  -> yields :class:`Workout`
 - ``iter_records(source, types=None, *, on_skip=None)`` -> yields :class:`Record`
-- ``MalformedRecordError`` -> raised by ``iter_records`` in strict mode (no ``on_skip``)
+- ``MalformedRecordError`` -> raised by ``iter_records`` in strict mode (no ``on_skip``),
+  and by ``analyze`` for a stored value it cannot read
 
 Both take ``source`` = a path (str or ``os.PathLike``) or an open binary file.
 """
@@ -27,12 +28,15 @@ _APPLE_DATETIME = "%Y-%m-%d %H:%M:%S %z"
 
 
 class MalformedRecordError(ValueError):
-    """A ``<Record>`` could not be parsed. Its message names only the record type.
+    """A ``<Record>`` in the export, or a value stored in the database, could not be
+    read. Its message names only the record type or the stored row's id, never a raw
+    value or timestamp.
 
     Python's own parse errors quote the offending text (``strptime`` puts the raw
     timestamp in its message), and a traceback would print it. This error is raised
-    ``from None`` in its place, so no raw health value or timestamp reaches a terminal,
-    a log, or an AI reading the output.
+    in its place, with the quoting error detached (``from None``, or raised outside the
+    ``except`` block), so no raw health value or timestamp reaches a terminal, a log,
+    or an AI reading the output.
     """
 
 
