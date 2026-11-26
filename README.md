@@ -58,6 +58,25 @@ Requires [uv](https://docs.astral.sh/uv/) and Python 3.11 or later.
    Run it again and both lines report 0 new. Import a newer export and each line
    also says how many rows it removed, if any. (Counts are illustrative.)
 
+4. See your training per week:
+
+   ```sh
+   uv run python -m apple_health_mcp.report            # the last 12 weeks
+   uv run python -m apple_health_mcp.report --weeks 4
+   ```
+
+   ```text
+   Week of     Sessions  Minutes  Active kcal  Types
+   2026-03-02         2       90          300  Running 1, Surfing Sports 1
+   2026-03-09         0        0            -
+   ```
+
+   Weeks run Monday to Sunday in each session's local time, and run up to the current
+   week, so a break shows as empty weeks (a session in a later local week, from a zone
+   ahead of this computer's, extends the table to its week). A session recorded by two sources (the Watch
+   and an app) counts once. "-" means no session that week has an energy figure. The
+   report only reads the database. (Figures are illustrative.)
+
 ## Privacy model
 
 - The export and the database stay on your machine; both are gitignored, and nothing

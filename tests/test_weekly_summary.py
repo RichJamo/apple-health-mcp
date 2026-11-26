@@ -22,6 +22,7 @@ from apple_health_mcp.analyze import (
     StoredWorkout,
     WeekSummary,
     local_start,
+    pad_to_week_of,
     weekly_summary,
     weekly_summary_from_db,
 )
@@ -379,3 +380,45 @@ def test_from_the_database_an_unreadable_stored_zone_stops_the_summary(tmp_path)
             weekly_summary_from_db(conn)
     finally:
         conn.close()
+
+
+# --- 4. pad_to_week_of ----------------------------------------------------------------
+
+# Sessions in the weeks of Monday 2 March and Monday 9 March 2026.
+_TWO_WEEKS = [_session(_utc(4, 6)), _session(_utc(10, 6))]
+
+
+@pytest.mark.parametrize(
+    ("day", "last_week"),
+    [
+        (date(2026, 3, 25), date(2026, 3, 23)),  # a Wednesday: its own week is included
+        (date(2026, 3, 29), date(2026, 3, 23)),  # a Sunday: still that week
+        (date(2026, 3, 30), date(2026, 3, 30)),  # the next Monday starts a new week
+    ],
+)
+def test_padding_adds_empty_weeks_up_to_the_week_of_the_day(day, last_week):
+    """A break in training up to today shows as empty weeks, not as nothing."""
+    weeks = weekly_summary(_TWO_WEEKS)
+
+    padded = pad_to_week_of(weeks, day)
+
+    assert padded[: len(weeks)] == weeks
+    assert padded[-1].week_start == last_week
+    assert all(
+        b.week_start - a.week_start == timedelta(days=7) for a, b in itertools.pairwise(padded)
+    )
+    assert all(w.sessions == 0 and w.active_energy_kcal is None for w in padded[len(weeks) :])
+
+
+@pytest.mark.parametrize("day", [date(2026, 3, 12), date(2026, 3, 1)])
+def test_padding_never_drops_a_week(day):
+    """A day in or before the last week (a session dated in the future) leaves the
+    weeks as they are."""
+    weeks = weekly_summary(_TWO_WEEKS)
+
+    assert pad_to_week_of(weeks, day) == weeks
+
+
+def test_padding_no_weeks_gives_no_weeks():
+    """With no sessions there is no first week to pad from."""
+    assert pad_to_week_of([], date(2026, 3, 25)) == []
