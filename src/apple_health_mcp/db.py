@@ -19,6 +19,8 @@ Public API:
 - ``workout_id(workout)``           -> the stable hash id
 - ``zone_from_tz(tz)``              -> the zone a stored ``tz`` value names; raises
   one of ``TZ_READ_ERRORS`` when it names none
+- ``stored_time(text, table, row)`` -> a stored UTC timestamp read back; refuses one
+  it cannot read with ``StoredValueError``, without quoting it
 - ``upsert_workouts(conn, ws)``     -> insert new, skip seen; returns # inserted
 - ``upsert_samples(conn, samples)`` -> same, for time-series :class:`Sample` rows
 - ``replace_workouts(conn, ws)`` / ``replace_samples(conn, samples)``
@@ -38,12 +40,12 @@ import json
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, tzinfo
+from datetime import UTC, datetime, timedelta, tzinfo
 from os import PathLike
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from apple_health_mcp.parse import Workout
+from apple_health_mcp.parse import MalformedRecordError, Workout
 
 # The schema this code writes, recorded in SQLite's ``user_version``. Bump it whenever
 # a table changes shape, or whenever ``workout_id`` or ``sample_id`` computes its key
@@ -67,7 +69,8 @@ class SchemaVersionError(Exception):
 
     The import's mirror needs the same thought (``replace_workouts``): it deletes a
     workout the newer export lacks, and gives an edited one a new id, so notes keyed
-    by workout id would come loose from their session.
+    by workout id would come loose from their session. So does every message that
+    gives ``REBUILD_ADVICE``: today it costs nothing, and then it would cost the notes.
     """
 
     def __init__(self, found: int, expected: int) -> None:
@@ -254,6 +257,61 @@ def _row_values(workout: Workout) -> tuple:
         _stored_tz(workout),
         json.dumps(workout.metadata, sort_keys=True),
     )
+
+
+# The remedy for an unreadable timestamp or time zone, which only a database written
+# elsewhere can hold: this code writes only readable ones, so a rebuild clears them.
+# Not for a heart-rate value: a non-finite one can come from the export itself (#16),
+# and a rebuild brings it back. Everything stored is derived from the export, so
+# rebuilding loses nothing; that stops being true once hand-entered data exists (see
+# ``SchemaVersionError``).
+REBUILD_ADVICE = "delete the database and import again to rebuild it"
+
+
+class StoredValueError(MalformedRecordError):
+    """A value in the database could not be read, as opposed to a record in the
+    export. Like its parent, the message never quotes the value.
+
+    Where it comes from decides the remedy, so callers must not assume one:
+    - an unreadable timestamp (``stored_time``) or time zone (``local_start``): only
+      a database written elsewhere can hold one, and the message gives
+      ``REBUILD_ADVICE``;
+    - a non-finite heart-rate value (``_stored_bpm``): it can come from the export
+      itself (#16), a rebuild brings it back, and the message gives no advice.
+    """
+
+
+def stored_time(text: str, table: str, row: str | int) -> datetime:
+    """A timestamp read back from ``table``, where this module wrote it with
+    ``astimezone(UTC).isoformat()``. ``row`` locates the row in the message.
+
+    Postcondition: a timezone-aware UTC datetime, the same moment that was stored.
+
+    Raises ``StoredValueError`` unless ``text`` is exactly what this module writes:
+    an ISO timestamp with a ``+00:00`` offset. Only a database written elsewhere can
+    hold anything else. Refusing the rest matters twice over:
+    - Python's own parse error quotes the text, and an MCP tool's error text reaches
+      the AI. So the message names only ``table`` and ``row``, and is raised outside
+      the ``except`` block, so nothing quoting is attached as its context.
+    - The queries compare stored times as text, which is sound only in this one
+      form. A naive time, another offset or a "Z" suffix would sort wrongly, silently.
+
+    For ``row``, pass a workout's id, or a reading's SQLite ``rowid``, never a
+    reading's id. A reading's id is an unsalted hash of its type, times, value and
+    source, so a few hundred thousand guesses recover the time and heart rate it
+    stands for. A workout's id is built the same way, and reversing it is far
+    costlier (its type, start and end: roughly 10^10 or more guesses) but possible.
+    So no message from this module may be passed to an AI as it is: the MCP server's
+    tools must return a short message of their own instead of an error's text, and
+    the server's tests pin that.
+    """
+    try:
+        moment = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        moment = None  # handled below, outside the except block
+    if moment is None or moment.utcoffset() != timedelta(0) or moment.isoformat() != text:
+        raise StoredValueError(f"unreadable timestamp in {table} row {row}; {REBUILD_ADVICE}")
+    return moment
 
 
 # What ``zone_from_tz`` raises for a value that names no zone. All may quote the value.

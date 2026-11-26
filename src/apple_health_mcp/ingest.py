@@ -29,10 +29,12 @@ from xml.etree import ElementTree as ET
 from apple_health_mcp.db import (
     Sample,
     SchemaVersionError,
+    StoredValueError,
     connect,
     init_schema,
     replace_samples,
     replace_workouts,
+    stored_time,
 )
 from apple_health_mcp.parse import MalformedRecordError, Record, iter_records, iter_workouts
 
@@ -113,13 +115,14 @@ def _windows_from_db(conn: sqlite3.Connection) -> list[tuple[datetime, datetime,
 
     Read from the database — the workouts are already imported — so the multi-GB
     export is not scanned a second time just to rebuild them. Each entry is
-    ``(window_start, window_end, workout_id)``.
+    ``(window_start, window_end, workout_id)``. Raises ``MalformedRecordError``,
+    naming the workout's id, for a stored time it cannot read (``db.stored_time``).
     """
     rows = conn.execute("SELECT id, start_utc, end_utc FROM workouts").fetchall()
     windows = [
         (
-            datetime.fromisoformat(start),
-            datetime.fromisoformat(end) + RECOVERY_WINDOW,
+            stored_time(start, "workouts", workout_id),
+            stored_time(end, "workouts", workout_id) + RECOVERY_WINDOW,
             workout_id,
         )
         for workout_id, start, end in rows
@@ -298,8 +301,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         s_inserted, s_kept, s_skipped = import_samples(args.export, args.db, strict=args.strict)
     except MalformedRecordError as err:
-        # The message names only the record type, never its raw value or timestamp.
-        print(f"aborted: {err} (run without --strict to skip and count it)", file=sys.stderr)
+        # The message names only a record type or a stored row, never a raw value or
+        # timestamp. The --strict hint fits only a malformed record in the export, not
+        # an unreadable value already in the database (a StoredValueError).
+        in_export = not isinstance(err, StoredValueError)
+        hint = " (run without --strict to skip and count it)" if args.strict and in_export else ""
+        print(f"aborted: {err}{hint}", file=sys.stderr)
         return 1
     s_removed = samples_before + s_inserted - _stored_rows(args.db, "samples")
     skipped_note = f" (skipped {s_skipped} malformed)" if s_skipped else ""
