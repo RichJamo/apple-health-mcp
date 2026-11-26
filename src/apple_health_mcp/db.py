@@ -115,21 +115,36 @@ def connect_read_only(path: str | PathLike[str]) -> sqlite3.Connection:
 
     For code that must never change the data, such as the report and the MCP server.
 
-    Postconditions: SQLite refuses any write through the returned connection
-    (``mode=ro``), and no file is created.
+    Postconditions:
+    - SQLite refuses every write to the database. ``mode=ro`` covers the main file
+      only, so attaching another database is also switched off: otherwise
+      ``ATTACH`` could reopen the same file read-write, or create a new file, and
+      ``VACUUM INTO`` could copy the whole database to any path. Temporary tables
+      still work; they live in memory or a temp file and vanish on close.
+    - A missing ``path`` is not created. (A database someone switched to WAL mode
+      with another tool still gets its ``-wal`` and ``-shm`` side files; this code
+      never turns WAL on.)
 
     Raises:
     - ``FileNotFoundError`` when nothing exists at ``path`` (``connect`` would
       quietly create an empty database there);
     - ``SchemaVersionError`` when the database is at another version than
-      ``SCHEMA_VERSION``. An empty database file is at version 0, so it is refused
-      too, with the same remedy: import again.
+      ``SCHEMA_VERSION``. An empty file is at version 0, so it is refused too, with
+      the same remedy: import again;
+    - ``sqlite3.DatabaseError`` when the file is not a SQLite database, or SQLite
+      cannot read it (busy, or left mid-write by an interrupted import). The
+      connection is closed first in every case.
     """
     file = Path(path)
     if not file.is_file():
         raise FileNotFoundError(f"no database at {file}")
     conn = sqlite3.connect(f"{file.resolve().as_uri()}?mode=ro", uri=True)
-    found = conn.execute("PRAGMA user_version").fetchone()[0]
+    conn.setlimit(sqlite3.SQLITE_LIMIT_ATTACHED, 0)
+    try:
+        found = conn.execute("PRAGMA user_version").fetchone()[0]
+    except sqlite3.DatabaseError:
+        conn.close()
+        raise
     if found != SCHEMA_VERSION:
         conn.close()
         raise SchemaVersionError(found, SCHEMA_VERSION)
