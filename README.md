@@ -15,11 +15,13 @@ training summary and the MCP server are next — see the [roadmap](#roadmap).
 
 - **Streaming import of the whole export.** Apple exports everything as one XML file
   that runs to gigabytes and millions of records. The parser streams it one element
-  at a time and frees memory as it goes: a full 1.9 GB export imports in about 30
-  seconds at about 28 MB peak memory.
+  at a time and frees memory as it goes: a full 1.9 GB export imports in about 40
+  seconds at about 32 MB peak memory.
 - **Idempotent storage.** Each workout and each reading gets a stable id — a hash of
   what identifies it, taken in UTC — so importing the same or an overlapping export
-  again never duplicates a row.
+  again never duplicates a row. The database mirrors the last export imported: a
+  newer export also removes what it no longer has, such as a workout you deleted in
+  Apple Health.
 - **Only what the analysis needs.** Workouts, plus the heart-rate readings that fall
   inside a workout or the five minutes after it (the recovery curve). The millions of
   other readings, clinical records, GPS routes and personal characteristics such as
@@ -51,7 +53,8 @@ Requires [uv](https://docs.astral.sh/uv/) and Python 3.11 or later.
    imported 70431 new of 70431 heart-rate samples
    ```
 
-   Run it again and both lines report 0 new. (Counts are illustrative.)
+   Run it again and both lines report 0 new. Import a newer export and each line
+   also says how many rows it removed, if any. (Counts are illustrative.)
 
 ## Privacy model
 

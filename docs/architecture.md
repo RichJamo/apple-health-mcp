@@ -194,7 +194,11 @@ feedback decoupled from Apple's schema.
 
 **Idempotent import:** each row's `id` is a stable hash of its source key, inserted
 with `ON CONFLICT DO NOTHING`, so re-importing the same or an overlapping export
-never duplicates.
+never duplicates. **The import mirrors the export:** after a complete pass, stored
+rows whose ids the export no longer has are deleted, in the same commit (a workout
+deleted in Apple Health, the old copy of one whose start, end, type or source
+changed, and their readings). Everything stored is derived from the export, so this
+loses nothing the export still holds.
 
 **Source dedup:** the same metric can appear from the Watch, the iPhone and
 third-party apps. The rule for workouts is decided below, made explicit and
