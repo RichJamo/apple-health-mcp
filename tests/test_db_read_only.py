@@ -129,3 +129,32 @@ def test_it_opens_a_path_with_characters_a_uri_must_escape(tmp_path):
 
     with closing(connect_read_only(db)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM workouts").fetchone()[0] == 3
+
+
+@pytest.mark.parametrize("problem", ["not a database", "another schema version"])
+def test_it_closes_the_connection_before_refusing(tmp_path, monkeypatch, problem):
+    """A refused open must not leave a connection open behind it: in a long-running
+    MCP server each one would leak until garbage collection."""
+    if problem == "not a database":
+        db = tmp_path / "notes.sqlite"
+        db.write_text("not a database\n", encoding="utf-8")
+    else:
+        db = _imported_database(tmp_path)
+        with closing(connect(db)) as conn:
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+    opened = []
+    real_connect = sqlite3.connect
+
+    def recording_connect(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", recording_connect)
+
+    with pytest.raises((sqlite3.DatabaseError, SchemaVersionError)):
+        connect_read_only(db)
+
+    (conn,) = opened
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        conn.execute("SELECT 1")

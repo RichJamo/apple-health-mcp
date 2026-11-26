@@ -163,7 +163,9 @@ def main(argv: list[str] | None = None, *, today: Callable[[], date] = date.toda
         print(f"aborted: {err}", file=sys.stderr)
         return 1
     except sqlite3.DatabaseError as err:
-        print(_database_error_message(args.db, err.sqlite_errorname or ""), file=sys.stderr)
+        # A DatabaseError raised by Python itself, not SQLite, has no error name.
+        error_name = getattr(err, "sqlite_errorname", "")
+        print(_database_error_message(args.db, error_name), file=sys.stderr)
         return 1
 
     if not weeks:

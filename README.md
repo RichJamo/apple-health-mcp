@@ -67,7 +67,8 @@ Requires [uv](https://docs.astral.sh/uv/) and Python 3.11 or later.
    ```
 
    Weeks run Monday to Sunday in each session's local time, and run up to the current
-   week, so a break shows as empty weeks. A session recorded by two sources (the Watch
+   week, so a break shows as empty weeks (a session in a later local week, from a zone
+   ahead of this computer's, extends the table to its week). A session recorded by two sources (the Watch
    and an app) counts once. "-" means no session that week has an energy figure. The
    report only reads the database. (Figures are illustrative.)
 

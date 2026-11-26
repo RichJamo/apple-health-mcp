@@ -121,6 +121,11 @@ def connect_read_only(path: str | PathLike[str]) -> sqlite3.Connection:
       ``ATTACH`` could reopen the same file read-write, or create a new file, and
       ``VACUUM INTO`` could copy the whole database to any path. Temporary tables
       still work; they live in memory or a temp file and vanish on close.
+    - What a connection can still change is its own view, until it closes: a temp
+      table or view named ``workouts`` hides the real one from later queries that
+      don't say ``main.workouts``, and ``PRAGMA locking_mode = EXCLUSIVE`` holds a
+      lock that makes an import wait. So never reuse one connection for SQL from
+      different callers: open one per call, as the report does once.
     - A missing ``path`` is not created. (A database someone switched to WAL mode
       with another tool still gets its ``-wal`` and ``-shm`` side files; this code
       never turns WAL on.)

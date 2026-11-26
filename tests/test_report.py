@@ -4,6 +4,8 @@ Synthetic data only, never real health data. The date is always passed in, so no
 test depends on the day it runs.
 """
 
+import shutil
+import sqlite3
 from contextlib import closing
 from datetime import date
 
@@ -219,10 +221,47 @@ def test_a_busy_or_part_written_database_is_not_called_not_a_database(
 ):
     """A busy database (an import holds the write lock) or a part-written one (an
     import was killed) must not be described as "not a database", or the person may
-    delete a file that waiting, or importing again, would have fixed. These states
-    need a real lock held for SQLite's 5-second timeout, or a killed process, so the
-    choice of message is tested on its own."""
+    delete a file that waiting, or importing again, would have fixed. A busy
+    database only shows after SQLite's 5-second wait, so the choice of message is
+    tested on its own here; the part-written case also runs through main below."""
     assert advice in _database_error_message(tmp_path / "health.sqlite", sqlite_errorname)
+
+
+def test_main_gives_the_part_written_advice_for_a_database_left_mid_write(tmp_path, capsys):
+    """A copy of the database and its journal, taken while a write is in flight, is
+    what a killed import leaves behind: a "hot" journal that a read-only connection
+    cannot roll back. This checks main passes SQLite's error name through."""
+    db = _database(tmp_path)
+    writer = sqlite3.connect(db)
+    writer.execute("PRAGMA cache_size = 1")  # spill changed pages to the file early
+    writer.execute("BEGIN IMMEDIATE")
+    writer.execute("CREATE TABLE filler AS SELECT * FROM workouts")
+    for _ in range(300):
+        writer.execute("INSERT INTO filler SELECT * FROM workouts")
+    crash = tmp_path / "crash"
+    crash.mkdir()
+    shutil.copy(db, crash / db.name)
+    shutil.copy(db.with_name(db.name + "-journal"), crash / (db.name + "-journal"))
+    writer.rollback()
+    writer.close()
+
+    assert _report(crash / db.name) == 1
+
+    assert "left part-written by an interrupted import" in capsys.readouterr().err
+
+
+def test_main_reports_a_database_error_that_has_no_sqlite_error_name(tmp_path, capsys, monkeypatch):
+    """A DatabaseError raised by Python itself, not SQLite, has no error name. main
+    must still print its message and exit 1, not crash inside its own handler."""
+
+    def failing_summary(_conn):
+        raise sqlite3.DatabaseError("raised by Python, not SQLite")
+
+    monkeypatch.setattr("apple_health_mcp.report.weekly_summary_from_db", failing_summary)
+
+    assert _report(_database(tmp_path)) == 1
+
+    assert "is not a database this tool can read" in capsys.readouterr().err
 
 
 def test_main_refuses_an_unreadable_stored_zone_without_quoting_it(tmp_path, capsys):
