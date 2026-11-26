@@ -21,16 +21,18 @@ import sqlite3
 import sys
 from bisect import bisect_right
 from collections.abc import Iterable, Iterator
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 from apple_health_mcp.db import (
     Sample,
     SchemaVersionError,
     connect,
     init_schema,
-    upsert_samples,
-    upsert_workouts,
+    replace_samples,
+    replace_workouts,
 )
 from apple_health_mcp.parse import MalformedRecordError, Record, iter_records, iter_workouts
 
@@ -43,6 +45,33 @@ SAMPLE_TYPES = frozenset({HEART_RATE, HEART_RATE_RECOVERY})
 # curve (how fast HR falls after exercise) survives. See docs/architecture.md.
 RECOVERY_WINDOW = timedelta(minutes=5)
 
+# The root element of an Apple Health export.xml. The clinical export_cda.xml that
+# sits beside it in the unzipped folder has another root, and no workouts.
+HEALTH_EXPORT_ROOT = "HealthData"
+
+
+class ExportRejectedError(ValueError):
+    """The file is not one the import may mirror: not an Apple Health export, or
+    one with no workouts while the database holds some. Raised before anything is
+    written, because the import removes whatever the export lacks. The message names
+    the file and counts, never a health value."""
+
+
+def _require_health_export(export_path: str | Path) -> None:
+    """Raise ``ExportRejectedError`` unless the file's root element is
+    ``HealthData``. Reads only the start of the file."""
+    try:
+        with open(export_path, "rb") as source:
+            _event, root = next(ET.iterparse(source, events=("start",)))
+            root_tag = root.tag
+    except (ET.ParseError, StopIteration, LookupError):
+        root_tag = ""  # empty, malformed, or in an unknown encoding: not an export
+    if root_tag != HEALTH_EXPORT_ROOT:
+        raise ExportRejectedError(
+            f"{export_path} is not an Apple Health export.xml (its root element is not "
+            f"{HEALTH_EXPORT_ROOT}); nothing was imported or removed"
+        )
+
 
 def import_export(export_path: str | Path, db_path: str | Path) -> tuple[int, int]:
     """Import the workouts from ``export_path`` into the SQLite database at ``db_path``.
@@ -53,14 +82,29 @@ def import_export(export_path: str | Path, db_path: str | Path) -> tuple[int, in
       re-running on the same export returns ``(0, seen)`` — the whole point.
 
     Contract:
-    - Precondition: ``export_path`` is a readable Apple Health ``export.xml``.
-    - Postcondition: every workout in the export is present in the database exactly
-      once, and the connection is committed (``upsert_workouts`` commits for you).
+    - Precondition: ``export_path`` is a readable Apple Health ``export.xml``, a
+      whole export. A partial one, say from a phone still syncing, would remove what
+      it lacks until the next full import.
+    - Postcondition: the database holds exactly the export's workouts, each once:
+      stored workouts the export no longer has (deleted in Apple Health, or the old
+      copy of one that changed) are removed. The change is committed in one
+      transaction (``replace_workouts``). ``main`` reports how many were removed.
+    - Raises ``ExportRejectedError``, before any row is written or removed, when the
+      file is not
+      an Apple Health export, or has no workouts while the database holds some: a
+      wrong or empty file would otherwise empty the database.
     """
-    conn = connect(db_path)
-    init_schema(conn)
-    workouts = list(iter_workouts(export_path))
-    inserted = upsert_workouts(conn, workouts)
+    _require_health_export(export_path)
+    with closing(connect(db_path)) as conn:
+        init_schema(conn)
+        workouts = list(iter_workouts(export_path))
+        stored = conn.execute("SELECT COUNT(*) FROM workouts").fetchone()[0]
+        if not workouts and stored:
+            raise ExportRejectedError(
+                f"{export_path} has no workouts, but the database holds {stored}; "
+                "nothing was removed. Check that this is the export you meant to import."
+            )
+        inserted, _removed = replace_workouts(conn, workouts)
     return inserted, len(workouts)
 
 
@@ -155,7 +199,18 @@ def import_samples(
     Precondition: the workouts are already imported (``import_export`` has run), since
     the windows are read from the workouts table. The whole thing streams — records
     are never all held in memory, so a 4.6M-row export stays bounded.
+
+    Postcondition: the samples table holds exactly the readings this pass kept, so
+    readings of a removed workout, and readings the export no longer has, are gone.
+    Removal happens only after a complete pass: a ``strict`` abort commits nothing.
+    The workouts were committed by ``import_export`` before this pass, so an abort
+    here leaves the workouts mirrored and the readings as they were.
+
+    Raises ``ExportRejectedError`` before any row is written or removed when the
+    file is not an
+    Apple Health export.
     """
+    _require_health_export(export_path)
     conn = connect(db_path)
     init_schema(conn)  # safe to repeat; ensures the samples table exists
     windows = _windows_from_db(conn)
@@ -178,7 +233,7 @@ def import_samples(
             yield sample
 
     try:
-        inserted = upsert_samples(conn, selected())
+        inserted, _removed = replace_samples(conn, selected())
     finally:
         conn.close()  # also on a strict-mode abort
     return inserted, kept, skipped
@@ -187,9 +242,12 @@ def import_samples(
 def main(argv: list[str] | None = None) -> int:
     """Parse arguments, run the import, and print one summary line per table.
 
-    Returns 0 on success, or 1 when ``--strict`` aborts on a malformed record (the
-    workouts imported before the abort stay; re-running is safe because import is
-    idempotent).
+    Returns 0 on success, or 1 with a one-line message when:
+    - the file cannot be read (missing, a directory), or is not an Apple Health
+      export, or has no workouts while the database holds some (nothing changed);
+    - the database was built by another version of this tool;
+    - ``--strict`` aborts on a malformed record (the workouts were already mirrored
+      and stay; re-running is safe because the import is idempotent).
     """
     parser = argparse.ArgumentParser(
         prog="apple_health_mcp.ingest",
@@ -212,8 +270,17 @@ def main(argv: list[str] | None = None) -> int:
     # The database lives in a gitignored data/ dir; create it on first run.
     args.db.parent.mkdir(parents=True, exist_ok=True)
 
+    workouts_before = _stored_rows(args.db, "workouts")
     try:
         w_inserted, w_seen = import_export(args.export, args.db)
+    except ExportRejectedError as err:
+        print(f"aborted: {err}", file=sys.stderr)
+        return 1
+    except OSError as err:
+        print(
+            f"aborted: cannot read {err.filename or args.export}: {err.strerror}", file=sys.stderr
+        )
+        return 1
     except SchemaVersionError as err:
         print(
             f"aborted: {args.db} was built by a different version of this tool "
@@ -222,17 +289,42 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"imported {w_inserted} new of {w_seen} workouts into {args.db}")
+    w_removed = workouts_before + w_inserted - _stored_rows(args.db, "workouts")
+    print(
+        f"imported {w_inserted} new of {w_seen} workouts into {args.db}{_removed_note(w_removed)}"
+    )
 
+    samples_before = _stored_rows(args.db, "samples")
     try:
         s_inserted, s_kept, s_skipped = import_samples(args.export, args.db, strict=args.strict)
     except MalformedRecordError as err:
         # The message names only the record type, never its raw value or timestamp.
         print(f"aborted: {err} (run without --strict to skip and count it)", file=sys.stderr)
         return 1
+    s_removed = samples_before + s_inserted - _stored_rows(args.db, "samples")
     skipped_note = f" (skipped {s_skipped} malformed)" if s_skipped else ""
-    print(f"imported {s_inserted} new of {s_kept} heart-rate samples{skipped_note}")
+    print(
+        f"imported {s_inserted} new of {s_kept} heart-rate samples"
+        f"{skipped_note}{_removed_note(s_removed)}"
+    )
     return 0
+
+
+def _stored_rows(db: Path, table: str) -> int:
+    """How many rows ``table`` holds in ``db``: 0 before the first import. ``main``
+    counts before and after each step, so the rows a newer export removed are the
+    rows before, plus those inserted, minus the rows after."""
+    if not db.is_file():
+        return 0
+    with closing(connect(db)) as conn:
+        has_table = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+        ).fetchone()[0]
+        return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] if has_table else 0
+
+
+def _removed_note(removed: int) -> str:
+    return f" (removed {removed} no longer in the export)" if removed else ""
 
 
 if __name__ == "__main__":

@@ -21,6 +21,10 @@ Public API:
   one of ``TZ_READ_ERRORS`` when it names none
 - ``upsert_workouts(conn, ws)``     -> insert new, skip seen; returns # inserted
 - ``upsert_samples(conn, samples)`` -> same, for time-series :class:`Sample` rows
+- ``replace_workouts(conn, ws)`` / ``replace_samples(conn, samples)``
+                                   -> make the table hold exactly these rows;
+  returns (# inserted, # removed). The import uses these, so the database mirrors
+  the export it last read.
 
 The samples half stores the heart-rate time-series that the training summary and
 heart-rate-recovery features read; each sample may carry the id of the workout it
@@ -60,6 +64,10 @@ class SchemaVersionError(Exception):
     data entered by hand (the planned ``workout_feedback``) would be lost by it, so
     adding one needs a real migration first; a test in tests/test_schema.py fails when
     a table outside the derived set appears, as the reminder.
+
+    The import's mirror needs the same thought (``replace_workouts``): it deletes a
+    workout the newer export lacks, and gives an edited one a new id, so notes keyed
+    by workout id would come loose from their session.
     """
 
     def __init__(self, found: int, expected: int) -> None:
@@ -323,9 +331,7 @@ def upsert_workouts(conn: sqlite3.Connection, workouts: Iterable[Workout]) -> in
     - Returns: the number of rows actually inserted (0 when every workout was
       already present — this is what the idempotency test checks).
     """
-    columns = ", ".join(_WORKOUT_COLUMNS)
-    placeholders = ", ".join("?" for _ in _WORKOUT_COLUMNS)
-    sql = f"INSERT OR IGNORE INTO workouts ({columns}) VALUES ({placeholders})"
+    sql = _insert_or_ignore("workouts", _WORKOUT_COLUMNS)
 
     inserted = 0
     for workout in workouts:
@@ -407,9 +413,7 @@ def upsert_samples(conn: sqlite3.Connection, samples: Iterable[Sample]) -> int:
     ``INSERT OR IGNORE``. Takes an iterable so the caller can stream millions of
     readings without ever holding them all in memory.
     """
-    columns = ", ".join(_SAMPLE_COLUMNS)
-    placeholders = ", ".join("?" for _ in _SAMPLE_COLUMNS)
-    sql = f"INSERT OR IGNORE INTO samples ({columns}) VALUES ({placeholders})"
+    sql = _insert_or_ignore("samples", _SAMPLE_COLUMNS)
 
     inserted = 0
     for sample in samples:
@@ -418,3 +422,86 @@ def upsert_samples(conn: sqlite3.Connection, samples: Iterable[Sample]) -> int:
 
     conn.commit()
     return inserted
+
+
+def replace_workouts(conn: sqlite3.Connection, workouts: Iterable[Workout]) -> tuple[int, int]:
+    """Make the workouts table hold exactly ``workouts``. Returns ``(inserted, removed)``.
+
+    New workouts are inserted and ones already stored are kept, as in
+    ``upsert_workouts``. Stored workouts that are not among ``workouts`` are then
+    deleted: a workout deleted in Apple Health, or the old copy of one whose start,
+    end, type or source changed (which gives it a new id).
+
+    The mirror is of which workouts exist, decided by id. A workout already stored
+    keeps the values it was first imported with, even if the export now gives
+    another figure under the same type, start, end and source.
+
+    Precondition: ``init_schema(conn)`` has been run, and ``workouts`` is a whole
+    export's workouts, since anything left out is deleted (the import checks the
+    file is an export, and refuses one with no workouts while the database holds
+    some; see ``ingest``).
+
+    Postcondition: the table's ids are exactly the ids of ``workouts``, committed in
+    one transaction. If iterating ``workouts`` raises, nothing is committed and
+    nothing has been deleted; closing the connection rolls back the inserts.
+    """
+    return _replace_rows(conn, "workouts", _WORKOUT_COLUMNS, map(_row_values, workouts))
+
+
+def replace_samples(conn: sqlite3.Connection, samples: Iterable[Sample]) -> tuple[int, int]:
+    """Make the samples table hold exactly ``samples``. Returns ``(inserted, removed)``.
+
+    The same contract as ``replace_workouts``, for readings: those whose workout is
+    gone, and those the newer export no longer has, are deleted. A reading already
+    stored keeps the ``workout_id`` it was first linked to, even if that workout
+    has since been replaced; select readings by time range, not by ``workout_id``.
+    ``samples`` is streamed; the ids seen so far are kept in a temporary SQLite
+    table, not in Python, so memory stays bounded.
+    """
+    return _replace_rows(conn, "samples", _SAMPLE_COLUMNS, map(_sample_row_values, samples))
+
+
+def _replace_rows(
+    conn: sqlite3.Connection,
+    table: str,
+    columns: tuple[str, ...],
+    rows: Iterable[tuple],
+) -> tuple[int, int]:
+    """Insert ``rows`` (column values, id first) with ``INSERT OR IGNORE``, then
+    delete every stored row whose id was not among them, and commit once.
+
+    When no transaction is open, this one begins and commits its own with explicit
+    ``BEGIN`` and ``COMMIT``, so the replacement is atomic and saved on any
+    connection: Python's default, ``isolation_level=None``, and Python 3.12's
+    ``autocommit=True`` (where ``conn.commit()`` does nothing). Inside a caller's open
+    transaction it joins it and commits that, as ``conn.commit()`` does. ``table``
+    and ``columns`` are this module's own constants, never caller input, so building
+    the SQL from them is safe.
+    """
+    insert = _insert_or_ignore(table, columns)
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS seen_ids (id TEXT PRIMARY KEY) WITHOUT ROWID")
+    began_here = not conn.in_transaction
+    if began_here:
+        conn.execute("BEGIN")
+    conn.execute("DELETE FROM temp.seen_ids")
+
+    inserted = 0
+    for values in rows:
+        inserted += conn.execute(insert, values).rowcount
+        conn.execute("INSERT OR IGNORE INTO temp.seen_ids (id) VALUES (?)", (values[0],))
+
+    removed = conn.execute(
+        f"DELETE FROM {table} WHERE id NOT IN (SELECT id FROM temp.seen_ids)"
+    ).rowcount
+    conn.execute("DELETE FROM temp.seen_ids")
+    if began_here:
+        conn.execute("COMMIT")
+    else:
+        conn.commit()
+    return inserted, removed
+
+
+def _insert_or_ignore(table: str, columns: tuple[str, ...]) -> str:
+    """The ``INSERT OR IGNORE`` statement for ``table``'s ``columns``, one ``?`` each."""
+    placeholders = ", ".join("?" for _ in columns)
+    return f"INSERT OR IGNORE INTO {table} ({', '.join(columns)}) VALUES ({placeholders})"
