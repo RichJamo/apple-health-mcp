@@ -98,7 +98,9 @@ data-free schema):
    export, and an export made in another zone would shift their local times. (That
    phone's zone has no daylight saving, so the probe cannot say whether a zone that
    has it gives each workout that zone's offset on the workout's date or one offset
-   for the whole export.)
+   for the whole export.) An `HKTimeZone` the importing machine cannot load is
+   stored the same way, as the `startDate` offset, so one bad name from an app
+   cannot stop the weekly summary; the name stays in `raw_metadata`.
 4. **Apple duplicates some `MetadataEntry` lines.** De-dupe by key.
 5. **Strength is logged as HIIT.** Rich records home dumbbell strength as
    `HighIntensityIntervalTraining`, same bucket as cardio HIIT. The workout *type*

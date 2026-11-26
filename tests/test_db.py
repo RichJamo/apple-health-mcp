@@ -4,6 +4,8 @@ These run against the synthetic fixture (tests/fixtures/sample_export.xml) — n
 real health data.
 """
 
+import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -102,3 +104,18 @@ def test_timestamp_stored_as_utc_with_zone_preserved(conn):
     assert row is not None
     assert row[0] == "2019-01-22T06:05:11+00:00"  # +0200 converted to UTC
     assert row[1] == "Africa/Johannesburg"  # HKTimeZone metadata, preserved
+
+
+@pytest.mark.parametrize("name", ["GMT+0200", "Mars/Olympus_Mons", "/etc/localtime"])
+def test_an_unloadable_zone_name_is_stored_as_the_start_offset(conn, name):
+    """Any app can write HKTimeZone. A name this machine cannot load would stop every
+    later summary, so tz gets the startDate offset instead, as when the export gives
+    no HKTimeZone. The name itself is kept in raw_metadata."""
+    workout = replace(next(iter_workouts(FIXTURE)), metadata={"HKTimeZone": name})
+    assert workout.start.strftime("%z") == "+0200"  # the fixture's offset
+
+    upsert_workouts(conn, [workout])
+
+    tz, raw_metadata = conn.execute("SELECT tz, raw_metadata FROM workouts").fetchone()
+    assert tz == "+0200"
+    assert json.loads(raw_metadata) == {"HKTimeZone": name}

@@ -98,9 +98,9 @@ def test_local_start_accepts_a_bare_offset(tz, offset):
 
 @pytest.mark.parametrize("tz", ["Mars/Olympus_Mons", "GMT+0200", "+02x0", "/etc/localtime"])
 def test_an_unrecognised_zone_is_refused_without_quoting_it(tz):
-    """The importer stores HKTimeZone as the export gives it, so an app could have
-    written "GMT+0200", and a zone newer than this machine's database fails the same
-    way. The error names the workout, not the value, and carries no error that does."""
+    """A stored tz this machine cannot read (from a database written elsewhere; the
+    importer itself stores only readable ones) is refused. The error names the
+    workout, not the value, and carries no error that does."""
     workout = _session(_utc(1, 22, 30), tz=tz)
 
     with pytest.raises(MalformedRecordError) as caught:
@@ -340,11 +340,10 @@ def test_from_the_database_a_workout_without_a_zone_name_uses_its_stored_offset(
     ]
 
 
-def test_from_the_database_an_unrecognised_zone_stops_the_summary(tmp_path):
-    """A stored zone name this machine cannot load stops the whole summary with
-    MalformedRecordError. Skipping the session instead would make the weekly counts
-    quietly stop adding up to the stored sessions, so failing is the documented
-    choice, and this pins it through the real import."""
+def test_from_the_database_an_unloadable_zone_name_is_placed_by_its_offset(tmp_path):
+    """An HKTimeZone this machine cannot load ("GMT+0200", as an app might write) is
+    stored as the startDate offset instead, so the session is still counted, in the
+    week its offset gives, and the summary does not stop."""
     export = _NO_ZONE_NAME_EXPORT.replace(
         'endDate="2026-03-08 23:50:00 +0200"/>',
         'endDate="2026-03-08 23:50:00 +0200">\n'
@@ -353,6 +352,26 @@ def test_from_the_database_an_unrecognised_zone_stops_the_summary(tmp_path):
     assert export.count("GMT+0200") == 1
     conn = connect(_import(tmp_path, export))
     try:
+        weeks = weekly_summary_from_db(conn)
+    finally:
+        conn.close()
+
+    assert [(w.week_start, w.sessions) for w in weeks] == [
+        (date(2026, 3, 2), 1),
+        (date(2026, 3, 9), 1),
+    ]
+
+
+def test_from_the_database_an_unreadable_stored_zone_stops_the_summary(tmp_path):
+    """The importer stores only zones this machine can read, but a database written
+    elsewhere (another machine's time zone database, or an older version of this
+    code) can still hold one it cannot. That stops the whole summary with
+    MalformedRecordError: skipping the session would make the weekly counts quietly
+    stop adding up to the stored sessions."""
+    conn = connect(_import(tmp_path, _NO_ZONE_NAME_EXPORT))
+    try:
+        with conn:
+            conn.execute("UPDATE workouts SET tz = 'GMT+0200'")  # as if written elsewhere
         with pytest.raises(MalformedRecordError):
             weekly_summary_from_db(conn)
     finally:

@@ -15,6 +15,8 @@ Public API:
 - ``init_schema(conn)``             -> create tables if absent; refuses a database
   built at another version with ``SchemaVersionError`` (see ``SCHEMA_VERSION``)
 - ``workout_id(workout)``           -> the stable hash id
+- ``zone_from_tz(tz)``              -> the zone a stored ``tz`` value names; raises
+  one of ``TZ_READ_ERRORS`` when it names none
 - ``upsert_workouts(conn, ws)``     -> insert new, skip seen; returns # inserted
 - ``upsert_samples(conn, samples)`` -> same, for time-series :class:`Sample` rows
 
@@ -30,8 +32,9 @@ import json
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from os import PathLike
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apple_health_mcp.parse import Workout
 
@@ -177,8 +180,8 @@ def _row_values(workout: Workout) -> tuple:
     idempotency logic:
     - timestamps are stored as UTC ISO strings (the original offset is not lost — it
       is preserved separately in ``tz``);
-    - ``tz`` prefers the export's ``HKTimeZone`` metadata (e.g. "Africa/Johannesburg")
-      and falls back to the numeric offset (e.g. "+0200") when it is absent;
+    - ``tz`` is the export's ``HKTimeZone`` (e.g. "Africa/Johannesburg") when this
+      machine can load it, else the startDate offset (e.g. "+0200"): see ``_stored_tz``;
     - ``raw_metadata`` is the metadata dict as sorted JSON, so the text is stable.
     """
     return (
@@ -191,9 +194,54 @@ def _row_values(workout: Workout) -> tuple:
         workout.heart_rate_average_bpm,
         workout.heart_rate_maximum_bpm,
         workout.source_name,
-        workout.metadata.get("HKTimeZone") or workout.start.strftime("%z"),
+        _stored_tz(workout),
         json.dumps(workout.metadata, sort_keys=True),
     )
+
+
+# What ``zone_from_tz`` raises for a value that names no zone. Both quote the value.
+TZ_READ_ERRORS = (ZoneInfoNotFoundError, ValueError)
+
+
+def zone_from_tz(tz: str) -> tzinfo:
+    """The zone a stored ``tz`` value names, for placing a workout in local time.
+
+    An offset ("+0200", "-0500") was written with ``strftime("%z")``, so it is read
+    back with ``strptime("%z")``. Anything else is a zone name for
+    ``zoneinfo.ZoneInfo``; a zone name never starts with a sign.
+
+    Raises one of ``TZ_READ_ERRORS`` when ``tz`` is neither. Their messages quote
+    ``tz``, so a caller that shows the error must replace it.
+    """
+    if tz.startswith(("+", "-")):
+        return datetime.strptime(tz, "%z").tzinfo
+    return ZoneInfo(tz)
+
+
+def _stored_tz(workout: Workout) -> str:
+    """The ``tz`` value stored for ``workout``.
+
+    It is the export's HKTimeZone when ``zone_from_tz`` can load it on this machine,
+    and otherwise the offset in startDate, as when the export gives no HKTimeZone.
+    Any app can write HKTimeZone (one might write "GMT+0200"), and a name this
+    machine cannot load would stop every later summary; stored as the offset, the
+    workout is still counted, placed in the exporting phone's zone. The name itself
+    is kept in ``raw_metadata``.
+
+    Postcondition: ``zone_from_tz`` accepts the result on this machine.
+    """
+    name = workout.metadata.get("HKTimeZone")
+    if name and _is_readable_tz(name):
+        return name
+    return workout.start.strftime("%z")
+
+
+def _is_readable_tz(tz: str) -> bool:
+    try:
+        zone_from_tz(tz)
+    except TZ_READ_ERRORS:
+        return False
+    return True
 
 
 def workout_id(workout: Workout) -> str:
