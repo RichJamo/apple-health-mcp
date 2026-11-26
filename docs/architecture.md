@@ -194,11 +194,20 @@ feedback decoupled from Apple's schema.
 
 **Idempotent import:** each row's `id` is a stable hash of its source key, inserted
 with `ON CONFLICT DO NOTHING`, so re-importing the same or an overlapping export
-never duplicates. **The import mirrors the export:** after a complete pass, stored
-rows whose ids the export no longer has are deleted, in the same commit (a workout
-deleted in Apple Health, the old copy of one whose start, end, type or source
-changed, and their readings). Everything stored is derived from the export, so this
-loses nothing the export still holds.
+never duplicates. **The import mirrors which rows the export holds:** after a
+complete pass over a table, stored rows whose ids the export no longer has are
+deleted, in that table's one commit. That removes a workout deleted in Apple Health,
+the old copy of one whose start, end, type or source changed, and readings no longer
+in any workout's window. The workouts are committed before the readings pass starts,
+so an abort during it leaves the workouts mirrored and the readings as before. The
+mirror is by id only: a row already stored keeps its first-imported values, and a
+reading keeps the `workout_id` it was first linked to, so select readings by time.
+Everything stored is derived from the export, so this loses nothing the export still
+holds. Two guards stop a wrong file emptying the database: the root element must be
+`HealthData`, and an export with no workouts is refused while the database holds
+some. A partial export (a phone still syncing) is not detected; it removes what it
+lacks until the next full import. Before hand-entered `workout_feedback` arrives,
+decide what happens to a note when its workout is removed or re-keyed.
 
 **Source dedup:** the same metric can appear from the Watch, the iPhone and
 third-party apps. The rule for workouts is decided below, made explicit and

@@ -18,10 +18,12 @@ training summary and the MCP server are next — see the [roadmap](#roadmap).
   at a time and frees memory as it goes: a full 1.9 GB export imports in about 40
   seconds at about 32 MB peak memory.
 - **Idempotent storage.** Each workout and each reading gets a stable id — a hash of
-  what identifies it, taken in UTC — so importing the same or an overlapping export
-  again never duplicates a row. The database mirrors the last export imported: a
-  newer export also removes what it no longer has, such as a workout you deleted in
-  Apple Health.
+  what identifies it, taken in UTC — so importing the same export again never
+  duplicates a row. The database mirrors which workouts and readings the last export
+  holds: a newer export also removes what it no longer has, such as a workout you
+  deleted in Apple Health. A row already stored keeps the figures it was first
+  imported with. Import your latest full export; a file that is not an export, or
+  has no workouts, is refused rather than emptying the database.
 - **Only what the analysis needs.** Workouts, plus the heart-rate readings that fall
   inside a workout or the five minutes after it (the recovery curve). The millions of
   other readings, clinical records, GPS routes and personal characteristics such as

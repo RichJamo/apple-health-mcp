@@ -24,6 +24,7 @@ from collections.abc import Iterable, Iterator
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 from apple_health_mcp.db import (
     Sample,
@@ -44,6 +45,33 @@ SAMPLE_TYPES = frozenset({HEART_RATE, HEART_RATE_RECOVERY})
 # curve (how fast HR falls after exercise) survives. See docs/architecture.md.
 RECOVERY_WINDOW = timedelta(minutes=5)
 
+# The root element of an Apple Health export.xml. The clinical export_cda.xml that
+# sits beside it in the unzipped folder has another root, and no workouts.
+HEALTH_EXPORT_ROOT = "HealthData"
+
+
+class ExportRejectedError(ValueError):
+    """The file is not one the import may mirror: not an Apple Health export, or
+    one with no workouts while the database holds some. Raised before anything is
+    written, because the import removes whatever the export lacks. The message names
+    the file and counts, never a health value."""
+
+
+def _require_health_export(export_path: str | Path) -> None:
+    """Raise ``ExportRejectedError`` unless the file's root element is
+    ``HealthData``. Reads only the start of the file."""
+    try:
+        with open(export_path, "rb") as source:
+            _event, root = next(ET.iterparse(source, events=("start",)))
+            root_tag = root.tag
+    except (ET.ParseError, StopIteration):
+        root_tag = ""  # an empty or malformed file is not an export either
+    if root_tag != HEALTH_EXPORT_ROOT:
+        raise ExportRejectedError(
+            f"{export_path} is not an Apple Health export.xml (its root element is not "
+            f"{HEALTH_EXPORT_ROOT}); nothing was imported or removed"
+        )
+
 
 def import_export(export_path: str | Path, db_path: str | Path) -> tuple[int, int]:
     """Import the workouts from ``export_path`` into the SQLite database at ``db_path``.
@@ -55,16 +83,27 @@ def import_export(export_path: str | Path, db_path: str | Path) -> tuple[int, in
 
     Contract:
     - Precondition: ``export_path`` is a readable Apple Health ``export.xml``, a
-      whole export (Apple's export always is).
+      whole export. Apple's export always is; a partial one, say from a phone still
+      syncing, would remove what it lacks until the next full import.
     - Postcondition: the database holds exactly the export's workouts, each once:
       stored workouts the export no longer has (deleted in Apple Health, or the old
-      copy of one that changed) are removed. The connection is committed
-      (``replace_workouts`` commits for you). ``main`` reports how many were removed.
+      copy of one that changed) are removed. The change is committed in one
+      transaction (``replace_workouts``). ``main`` reports how many were removed.
+    - Raises ``ExportRejectedError``, before writing anything, when the file is not
+      an Apple Health export, or has no workouts while the database holds some: a
+      wrong or empty file would otherwise empty the database.
     """
-    conn = connect(db_path)
-    init_schema(conn)
-    workouts = list(iter_workouts(export_path))
-    inserted, _removed = replace_workouts(conn, workouts)
+    _require_health_export(export_path)
+    with closing(connect(db_path)) as conn:
+        init_schema(conn)
+        workouts = list(iter_workouts(export_path))
+        stored = conn.execute("SELECT COUNT(*) FROM workouts").fetchone()[0]
+        if not workouts and stored:
+            raise ExportRejectedError(
+                f"{export_path} has no workouts, but the database holds {stored}; "
+                "nothing was removed. Check that this is the export you meant to import."
+            )
+        inserted, _removed = replace_workouts(conn, workouts)
     return inserted, len(workouts)
 
 
@@ -163,7 +202,13 @@ def import_samples(
     Postcondition: the samples table holds exactly the readings this pass kept, so
     readings of a removed workout, and readings the export no longer has, are gone.
     Removal happens only after a complete pass: a ``strict`` abort commits nothing.
+    The workouts were committed by ``import_export`` before this pass, so an abort
+    here leaves the workouts mirrored and the readings as they were.
+
+    Raises ``ExportRejectedError`` before writing anything when the file is not an
+    Apple Health export.
     """
+    _require_health_export(export_path)
     conn = connect(db_path)
     init_schema(conn)  # safe to repeat; ensures the samples table exists
     windows = _windows_from_db(conn)
@@ -223,6 +268,9 @@ def main(argv: list[str] | None = None) -> int:
     workouts_before = _stored_rows(args.db, "workouts")
     try:
         w_inserted, w_seen = import_export(args.export, args.db)
+    except ExportRejectedError as err:
+        print(f"aborted: {err}", file=sys.stderr)
+        return 1
     except SchemaVersionError as err:
         print(
             f"aborted: {args.db} was built by a different version of this tool "
