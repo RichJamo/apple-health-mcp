@@ -259,17 +259,25 @@ def _row_values(workout: Workout) -> tuple:
     )
 
 
-# The remedy for a value this code cannot read in a database it did not write.
-# Everything stored is derived from the export, so rebuilding loses nothing; that
-# stops being true once hand-entered data exists (see ``SchemaVersionError``).
+# The remedy for an unreadable timestamp or time zone, which only a database written
+# elsewhere can hold: this code writes only readable ones, so a rebuild clears them.
+# Not for a heart-rate value: a non-finite one can come from the export itself (#16),
+# and a rebuild brings it back. Everything stored is derived from the export, so
+# rebuilding loses nothing; that stops being true once hand-entered data exists (see
+# ``SchemaVersionError``).
 REBUILD_ADVICE = "delete the database and import again to rebuild it"
 
 
 class StoredValueError(MalformedRecordError):
     """A value in the database could not be read, as opposed to a record in the
-    export. Only a database written elsewhere can hold one, and the remedy is
-    ``REBUILD_ADVICE``. Like its parent, the message never quotes the value; it
-    locates the row by something derived from no health data (see ``stored_time``).
+    export. Like its parent, the message never quotes the value.
+
+    Where it comes from decides the remedy, so callers must not assume one:
+    - an unreadable timestamp (``stored_time``) or time zone (``local_start``): only
+      a database written elsewhere can hold one, and the message gives
+      ``REBUILD_ADVICE``;
+    - a non-finite heart-rate value (``_stored_bpm``): it can come from the export
+      itself (#16), a rebuild brings it back, and the message gives no advice.
     """
 
 
@@ -291,8 +299,11 @@ def stored_time(text: str, table: str, row: str | int) -> datetime:
     For ``row``, pass a workout's id, or a reading's SQLite ``rowid``, never a
     reading's id. A reading's id is an unsalted hash of its type, times, value and
     source, so a few hundred thousand guesses recover the time and heart rate it
-    stands for. A workout's id is built the same way, but reversing it needs its
-    start, end and type, which the MCP tools return anyway.
+    stands for. A workout's id is built the same way, and reversing it is far
+    costlier (its type, start and end: roughly 10^10 or more guesses) but possible.
+    So no message from this module may be passed to an AI as it is: the MCP server's
+    tools must return a short message of their own instead of an error's text, and
+    the server's tests pin that.
     """
     try:
         moment = datetime.fromisoformat(text)

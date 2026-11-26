@@ -29,8 +29,8 @@ _APPLE_DATETIME = "%Y-%m-%d %H:%M:%S %z"
 
 class MalformedRecordError(ValueError):
     """A ``<Record>`` in the export, or a value stored in the database, could not be
-    read. Its message names only the record type or the stored row's id, never a raw
-    value or timestamp.
+    read. Its message names only the record type, or locates a stored row (a
+    workout's id, a reading's SQLite rowid), never a raw value or timestamp.
 
     Python's own parse errors quote the offending text (``strptime`` puts the raw
     timestamp in its message), and a traceback would print it. This error is raised
