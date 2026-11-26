@@ -7,6 +7,7 @@ either. Synthetic exports only, never real health data.
 """
 
 import sqlite3
+import sys
 from contextlib import closing
 
 import pytest
@@ -157,25 +158,33 @@ def test_the_command_line_says_nothing_about_removal_when_nothing_was_removed(tm
     assert "removed" not in capsys.readouterr().out
 
 
-class _CommitCountingConnection(sqlite3.Connection):
-    commits = 0
-
-    def commit(self):
-        self.commits += 1
-        super().commit()
-
-
-def test_inserts_and_removals_are_committed_together(tmp_path):
-    """One commit for the whole replacement: an interruption between inserting and
-    removing can then never leave the database holding both old and new rows."""
+@pytest.mark.parametrize(
+    "mode",
+    ["default", "isolation_level=None", "autocommit=True"],
+)
+def test_inserts_and_removals_are_committed_together(tmp_path, mode):
+    """One COMMIT for the whole replacement, after the inserts and the removal, so an
+    interruption between them can never leave both old and new rows. It holds, and
+    is saved, whichever transaction mode the connection was opened in."""
+    if mode == "autocommit=True" and sys.version_info < (3, 12):
+        pytest.skip("the autocommit attribute arrived in Python 3.12")
+    options = {"default": {}, "isolation_level=None": {"isolation_level": None}}.get(
+        mode, {"autocommit": True}
+    )
     db = _import(tmp_path, _export(RUN, SURF), "first.xml")
     later_workouts = list(_workouts_in(_export(SURF), tmp_path / "later.xml"))
-    conn = sqlite3.connect(db, factory=_CommitCountingConnection)
+    statements = []
+    conn = sqlite3.connect(db, **options)
     try:
+        conn.set_trace_callback(statements.append)
         assert replace_workouts(conn, later_workouts) == (0, 1)
-        assert conn.commits == 1
     finally:
         conn.close()
+
+    commits = [i for i, s in enumerate(statements) if s.strip().upper() == "COMMIT"]
+    removal = next(i for i, s in enumerate(statements) if s.startswith("DELETE FROM workouts"))
+    assert len(commits) == 1 and commits[0] > removal
+    assert _rows(db, "workouts") == 1  # and it was saved: the run is gone
 
 
 def _workouts_in(text: str, path):
@@ -281,3 +290,27 @@ def test_a_replacement_that_fails_part_way_keeps_nothing_even_in_autocommit_mode
         conn.close()
 
     assert _rows(db, "workouts") == 1  # the surf was not kept, the run not removed
+
+
+@pytest.mark.parametrize("problem", ["missing", "directory"])
+def test_the_command_line_refuses_an_unreadable_file_with_a_message(tmp_path, capsys, problem):
+    db = _import(tmp_path, _export(RUN, SURF, RUN_READING, SURF_READING), "first.xml")
+    path = tmp_path / ("missing.xml" if problem == "missing" else "a-folder")
+    if problem == "directory":
+        path.mkdir()
+
+    assert main([str(path), "--db", str(db)]) == 1
+
+    assert f"aborted: cannot read {path}" in capsys.readouterr().err
+    assert (_rows(db, "workouts"), _rows(db, "samples")) == (2, 2)
+
+
+def test_a_file_in_an_unknown_encoding_is_refused_as_not_an_export(tmp_path):
+    db = _import(tmp_path, _export(RUN), "first.xml")
+    odd = tmp_path / "odd.xml"
+    odd.write_text('<?xml version="1.0" encoding="no-such-encoding"?>\n<HealthData/>\n')
+
+    with pytest.raises(ExportRejectedError):
+        import_export(odd, db)
+
+    assert _rows(db, "workouts") == 1

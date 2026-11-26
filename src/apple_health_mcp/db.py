@@ -389,7 +389,8 @@ def replace_workouts(conn: sqlite3.Connection, workouts: Iterable[Workout]) -> t
 
     Precondition: ``init_schema(conn)`` has been run, and ``workouts`` is a whole
     export's workouts, since anything left out is deleted (the import checks the
-    file is an export and refuses one with no workouts; see ``ingest``).
+    file is an export, and refuses one with no workouts while the database holds
+    some; see ``ingest``).
 
     Postcondition: the table's ids are exactly the ids of ``workouts``, committed in
     one transaction. If iterating ``workouts`` raises, nothing is committed and
@@ -420,14 +421,18 @@ def _replace_rows(
     """Insert ``rows`` (column values, id first) with ``INSERT OR IGNORE``, then
     delete every stored row whose id was not among them, and commit once.
 
-    The transaction is begun explicitly, so it holds even on a connection opened in
-    autocommit mode (``isolation_level=None``). ``table`` and ``columns`` are this
-    module's own constants, never caller input, so building the SQL from them is
-    safe.
+    When no transaction is open, this one begins and commits its own with explicit
+    ``BEGIN`` and ``COMMIT``, so the replacement is atomic and saved on any
+    connection: Python's default, ``isolation_level=None``, and Python 3.12's
+    ``autocommit=True`` (where ``conn.commit()`` does nothing). Inside a caller's open
+    transaction it joins it and commits that, as ``conn.commit()`` does. ``table``
+    and ``columns`` are this module's own constants, never caller input, so building
+    the SQL from them is safe.
     """
     insert = _insert_or_ignore(table, columns)
     conn.execute("CREATE TEMP TABLE IF NOT EXISTS seen_ids (id TEXT PRIMARY KEY) WITHOUT ROWID")
-    if not conn.in_transaction:
+    began_here = not conn.in_transaction
+    if began_here:
         conn.execute("BEGIN")
     conn.execute("DELETE FROM temp.seen_ids")
 
@@ -440,7 +445,10 @@ def _replace_rows(
         f"DELETE FROM {table} WHERE id NOT IN (SELECT id FROM temp.seen_ids)"
     ).rowcount
     conn.execute("DELETE FROM temp.seen_ids")
-    conn.commit()
+    if began_here:
+        conn.execute("COMMIT")
+    else:
+        conn.commit()
     return inserted, removed
 
 

@@ -64,8 +64,8 @@ def _require_health_export(export_path: str | Path) -> None:
         with open(export_path, "rb") as source:
             _event, root = next(ET.iterparse(source, events=("start",)))
             root_tag = root.tag
-    except (ET.ParseError, StopIteration):
-        root_tag = ""  # an empty or malformed file is not an export either
+    except (ET.ParseError, StopIteration, LookupError):
+        root_tag = ""  # empty, malformed, or in an unknown encoding: not an export
     if root_tag != HEALTH_EXPORT_ROOT:
         raise ExportRejectedError(
             f"{export_path} is not an Apple Health export.xml (its root element is not "
@@ -83,13 +83,14 @@ def import_export(export_path: str | Path, db_path: str | Path) -> tuple[int, in
 
     Contract:
     - Precondition: ``export_path`` is a readable Apple Health ``export.xml``, a
-      whole export. Apple's export always is; a partial one, say from a phone still
-      syncing, would remove what it lacks until the next full import.
+      whole export. A partial one, say from a phone still syncing, would remove what
+      it lacks until the next full import.
     - Postcondition: the database holds exactly the export's workouts, each once:
       stored workouts the export no longer has (deleted in Apple Health, or the old
       copy of one that changed) are removed. The change is committed in one
       transaction (``replace_workouts``). ``main`` reports how many were removed.
-    - Raises ``ExportRejectedError``, before writing anything, when the file is not
+    - Raises ``ExportRejectedError``, before any row is written or removed, when the
+      file is not
       an Apple Health export, or has no workouts while the database holds some: a
       wrong or empty file would otherwise empty the database.
     """
@@ -205,7 +206,8 @@ def import_samples(
     The workouts were committed by ``import_export`` before this pass, so an abort
     here leaves the workouts mirrored and the readings as they were.
 
-    Raises ``ExportRejectedError`` before writing anything when the file is not an
+    Raises ``ExportRejectedError`` before any row is written or removed when the
+    file is not an
     Apple Health export.
     """
     _require_health_export(export_path)
@@ -240,9 +242,12 @@ def import_samples(
 def main(argv: list[str] | None = None) -> int:
     """Parse arguments, run the import, and print one summary line per table.
 
-    Returns 0 on success, or 1 when ``--strict`` aborts on a malformed record (the
-    workouts imported before the abort stay; re-running is safe because import is
-    idempotent).
+    Returns 0 on success, or 1 with a one-line message when:
+    - the file cannot be read (missing, a directory), or is not an Apple Health
+      export, or has no workouts while the database holds some (nothing changed);
+    - the database was built by another version of this tool;
+    - ``--strict`` aborts on a malformed record (the workouts were already mirrored
+      and stay; re-running is safe because the import is idempotent).
     """
     parser = argparse.ArgumentParser(
         prog="apple_health_mcp.ingest",
@@ -270,6 +275,11 @@ def main(argv: list[str] | None = None) -> int:
         w_inserted, w_seen = import_export(args.export, args.db)
     except ExportRejectedError as err:
         print(f"aborted: {err}", file=sys.stderr)
+        return 1
+    except OSError as err:
+        print(
+            f"aborted: cannot read {err.filename or args.export}: {err.strerror}", file=sys.stderr
+        )
         return 1
     except SchemaVersionError as err:
         print(
