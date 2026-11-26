@@ -29,6 +29,7 @@ from xml.etree import ElementTree as ET
 from apple_health_mcp.db import (
     Sample,
     SchemaVersionError,
+    StoredValueError,
     connect,
     init_schema,
     replace_samples,
@@ -300,9 +301,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         s_inserted, s_kept, s_skipped = import_samples(args.export, args.db, strict=args.strict)
     except MalformedRecordError as err:
-        # The message names only a record type or a stored row's id, never a raw value
-        # or timestamp. The --strict hint fits only a malformed record in the export.
-        hint = " (run without --strict to skip and count it)" if args.strict else ""
+        # The message names only a record type or a stored row, never a raw value or
+        # timestamp. The --strict hint fits only a malformed record in the export, not
+        # an unreadable value already in the database (a StoredValueError).
+        in_export = not isinstance(err, StoredValueError)
+        hint = " (run without --strict to skip and count it)" if args.strict and in_export else ""
         print(f"aborted: {err}{hint}", file=sys.stderr)
         return 1
     s_removed = samples_before + s_inserted - _stored_rows(args.db, "samples")
