@@ -19,6 +19,8 @@ Public API:
 - ``workout_id(workout)``           -> the stable hash id
 - ``zone_from_tz(tz)``              -> the zone a stored ``tz`` value names; raises
   one of ``TZ_READ_ERRORS`` when it names none
+- ``stored_time(text, table, row_id)`` -> a stored UTC timestamp read back; refuses
+  one it cannot read without quoting it
 - ``upsert_workouts(conn, ws)``     -> insert new, skip seen; returns # inserted
 - ``upsert_samples(conn, samples)`` -> same, for time-series :class:`Sample` rows
 - ``replace_workouts(conn, ws)`` / ``replace_samples(conn, samples)``
@@ -43,7 +45,7 @@ from os import PathLike
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from apple_health_mcp.parse import Workout
+from apple_health_mcp.parse import MalformedRecordError, Workout
 
 # The schema this code writes, recorded in SQLite's ``user_version``. Bump it whenever
 # a table changes shape, or whenever ``workout_id`` or ``sample_id`` computes its key
@@ -254,6 +256,31 @@ def _row_values(workout: Workout) -> tuple:
         _stored_tz(workout),
         json.dumps(workout.metadata, sort_keys=True),
     )
+
+
+def stored_time(text: str, table: str, row_id: str) -> datetime:
+    """A timestamp read back from ``table``, where this module wrote it with
+    ``astimezone(UTC).isoformat()``.
+
+    Postcondition: a timezone-aware datetime, the same moment that was stored.
+
+    Raises ``MalformedRecordError`` when ``text`` is not a timezone-aware ISO
+    timestamp, which only a database written elsewhere can hold. Python's own error
+    quotes the text, and from an MCP tool that text would reach the AI, so the
+    message names only ``table`` and ``row_id`` and is raised outside the ``except``
+    block (nothing quoting is attached as its context). A naive timestamp is refused
+    too: compared with an aware one it would raise later, somewhere less clear.
+    """
+    try:
+        moment = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        moment = None  # handled below, outside the except block
+    if moment is None or moment.tzinfo is None:
+        raise MalformedRecordError(
+            f"unreadable timestamp in {table} row {row_id}; "
+            "delete the database and import again to rebuild it"
+        )
+    return moment
 
 
 # What ``zone_from_tz`` raises for a value that names no zone. All may quote the value.

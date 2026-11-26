@@ -33,7 +33,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
-from apple_health_mcp.db import TZ_READ_ERRORS, zone_from_tz
+from apple_health_mcp.db import TZ_READ_ERRORS, stored_time, zone_from_tz
 from apple_health_mcp.ingest import HEART_RATE, HEART_RATE_RECOVERY, RECOVERY_WINDOW
 from apple_health_mcp.parse import MalformedRecordError
 
@@ -81,6 +81,9 @@ def load_workouts(conn: sqlite3.Connection) -> list[StoredWorkout]:
     """Every stored workout, sorted by start, then id.
 
     Precondition: the database was built by ``ingest`` (its schema is current).
+
+    Raises ``MalformedRecordError`` naming the workout's id, never the text, when a
+    stored start or end cannot be read (see ``db.stored_time``).
     """
     rows = conn.execute(
         "SELECT id, activity_type, start_utc, end_utc, duration_s, active_energy_kcal,"
@@ -91,8 +94,8 @@ def load_workouts(conn: sqlite3.Connection) -> list[StoredWorkout]:
         StoredWorkout(
             id=workout_id,
             activity_type=activity_type,
-            start=datetime.fromisoformat(start_utc),
-            end=datetime.fromisoformat(end_utc),
+            start=stored_time(start_utc, "workouts", workout_id),
+            end=stored_time(end_utc, "workouts", workout_id),
             duration_s=duration_s,
             active_energy_kcal=active_energy_kcal,
             heart_rate_average_bpm=heart_rate_average_bpm,
@@ -231,10 +234,12 @@ def readings_around(conn: sqlite3.Connection, workout: StoredWorkout) -> list[Re
     Raises :class:`~apple_health_mcp.parse.MalformedRecordError` if a stored value is
     not a finite number ("NaN" and "inf" parse as floats but would read as real
     figures). Its message names only the reading's type, and no other error is attached
-    to it: Python's own error would quote the raw value.
+    to it: Python's own error would quote the raw value. It also raises
+    ``MalformedRecordError``, naming the reading's id, when a stored start or end
+    cannot be read (see ``db.stored_time``).
     """
     rows = conn.execute(
-        "SELECT type, start_utc, end_utc, value FROM samples"
+        "SELECT id, type, start_utc, end_utc, value FROM samples"
         " WHERE type IN (?, ?) AND start_utc >= ? AND start_utc <= ? AND value IS NOT NULL"
         " ORDER BY start_utc, type",
         (
@@ -247,11 +252,11 @@ def readings_around(conn: sqlite3.Connection, workout: StoredWorkout) -> list[Re
     return [
         Reading(
             type=kind,
-            start=datetime.fromisoformat(start_utc),
-            end=datetime.fromisoformat(end_utc),
+            start=stored_time(start_utc, "samples", sample_id),
+            end=stored_time(end_utc, "samples", sample_id),
             bpm=_stored_bpm(kind, value),
         )
-        for kind, start_utc, end_utc, value in rows
+        for sample_id, kind, start_utc, end_utc, value in rows
     ]
 
 
