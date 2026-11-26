@@ -19,6 +19,10 @@ Public API:
   one of ``TZ_READ_ERRORS`` when it names none
 - ``upsert_workouts(conn, ws)``     -> insert new, skip seen; returns # inserted
 - ``upsert_samples(conn, samples)`` -> same, for time-series :class:`Sample` rows
+- ``replace_workouts(conn, ws)`` / ``replace_samples(conn, samples)``
+                                   -> make the table hold exactly these rows;
+  returns (# inserted, # removed). The import uses these, so the database mirrors
+  the export it last read.
 
 The samples half stores the heart-rate time-series that the training summary and
 heart-rate-recovery features read; each sample may carry the id of the workout it
@@ -369,3 +373,64 @@ def upsert_samples(conn: sqlite3.Connection, samples: Iterable[Sample]) -> int:
 
     conn.commit()
     return inserted
+
+
+def replace_workouts(conn: sqlite3.Connection, workouts: Iterable[Workout]) -> tuple[int, int]:
+    """Make the workouts table hold exactly ``workouts``. Returns ``(inserted, removed)``.
+
+    New workouts are inserted and ones already stored are kept, as in
+    ``upsert_workouts``. Stored workouts that are not among ``workouts`` are then
+    deleted: a workout deleted in Apple Health, or the old copy of one whose start,
+    end, type or source changed (which gives it a new id).
+
+    Precondition: ``init_schema(conn)`` has been run, and ``workouts`` is a whole
+    export's workouts, since anything left out is deleted.
+
+    Postcondition: the table's ids are exactly the ids of ``workouts``, committed in
+    one transaction. If iterating ``workouts`` raises, nothing is committed: the
+    caller's close rolls back the inserts, and nothing has been deleted.
+    """
+    return _replace_rows(conn, "workouts", _WORKOUT_COLUMNS, map(_row_values, workouts))
+
+
+def replace_samples(conn: sqlite3.Connection, samples: Iterable[Sample]) -> tuple[int, int]:
+    """Make the samples table hold exactly ``samples``. Returns ``(inserted, removed)``.
+
+    The same contract as ``replace_workouts``, for readings: those whose workout is
+    gone, and those the newer export no longer has, are deleted. ``samples`` is
+    streamed; the ids seen so far are kept in a temporary SQLite table, not in
+    Python, so memory stays bounded.
+    """
+    return _replace_rows(conn, "samples", _SAMPLE_COLUMNS, map(_sample_row_values, samples))
+
+
+def _replace_rows(
+    conn: sqlite3.Connection,
+    table: str,
+    columns: tuple[str, ...],
+    rows: Iterable[tuple],
+) -> tuple[int, int]:
+    """Insert ``rows`` (column values, id first) with ``INSERT OR IGNORE``, then
+    delete every stored row whose id was not among them, and commit once.
+
+    ``table`` and ``columns`` are this module's own constants, never caller input,
+    so building the SQL from them is safe.
+    """
+    insert = (
+        f"INSERT OR IGNORE INTO {table} ({', '.join(columns)})"
+        f" VALUES ({', '.join('?' for _ in columns)})"
+    )
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS seen_ids (id TEXT PRIMARY KEY)")
+    conn.execute("DELETE FROM temp.seen_ids")
+
+    inserted = 0
+    for values in rows:
+        inserted += conn.execute(insert, values).rowcount
+        conn.execute("INSERT OR IGNORE INTO temp.seen_ids (id) VALUES (?)", (values[0],))
+
+    removed = conn.execute(
+        f"DELETE FROM {table} WHERE id NOT IN (SELECT id FROM temp.seen_ids)"
+    ).rowcount
+    conn.execute("DELETE FROM temp.seen_ids")
+    conn.commit()
+    return inserted, removed

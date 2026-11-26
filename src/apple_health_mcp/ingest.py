@@ -21,6 +21,7 @@ import sqlite3
 import sys
 from bisect import bisect_right
 from collections.abc import Iterable, Iterator
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -29,8 +30,8 @@ from apple_health_mcp.db import (
     SchemaVersionError,
     connect,
     init_schema,
-    upsert_samples,
-    upsert_workouts,
+    replace_samples,
+    replace_workouts,
 )
 from apple_health_mcp.parse import MalformedRecordError, Record, iter_records, iter_workouts
 
@@ -53,14 +54,17 @@ def import_export(export_path: str | Path, db_path: str | Path) -> tuple[int, in
       re-running on the same export returns ``(0, seen)`` — the whole point.
 
     Contract:
-    - Precondition: ``export_path`` is a readable Apple Health ``export.xml``.
-    - Postcondition: every workout in the export is present in the database exactly
-      once, and the connection is committed (``upsert_workouts`` commits for you).
+    - Precondition: ``export_path`` is a readable Apple Health ``export.xml``, a
+      whole export (Apple's export always is).
+    - Postcondition: the database holds exactly the export's workouts, each once:
+      stored workouts the export no longer has (deleted in Apple Health, or the old
+      copy of one that changed) are removed. The connection is committed
+      (``replace_workouts`` commits for you). ``main`` reports how many were removed.
     """
     conn = connect(db_path)
     init_schema(conn)
     workouts = list(iter_workouts(export_path))
-    inserted = upsert_workouts(conn, workouts)
+    inserted, _removed = replace_workouts(conn, workouts)
     return inserted, len(workouts)
 
 
@@ -155,6 +159,10 @@ def import_samples(
     Precondition: the workouts are already imported (``import_export`` has run), since
     the windows are read from the workouts table. The whole thing streams — records
     are never all held in memory, so a 4.6M-row export stays bounded.
+
+    Postcondition: the samples table holds exactly the readings this pass kept, so
+    readings of a removed workout, and readings the export no longer has, are gone.
+    Removal happens only after a complete pass: a ``strict`` abort commits nothing.
     """
     conn = connect(db_path)
     init_schema(conn)  # safe to repeat; ensures the samples table exists
@@ -178,7 +186,7 @@ def import_samples(
             yield sample
 
     try:
-        inserted = upsert_samples(conn, selected())
+        inserted, _removed = replace_samples(conn, selected())
     finally:
         conn.close()  # also on a strict-mode abort
     return inserted, kept, skipped
@@ -212,6 +220,7 @@ def main(argv: list[str] | None = None) -> int:
     # The database lives in a gitignored data/ dir; create it on first run.
     args.db.parent.mkdir(parents=True, exist_ok=True)
 
+    workouts_before = _stored_rows(args.db, "workouts")
     try:
         w_inserted, w_seen = import_export(args.export, args.db)
     except SchemaVersionError as err:
@@ -222,17 +231,42 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"imported {w_inserted} new of {w_seen} workouts into {args.db}")
+    w_removed = workouts_before + w_inserted - _stored_rows(args.db, "workouts")
+    print(
+        f"imported {w_inserted} new of {w_seen} workouts into {args.db}{_removed_note(w_removed)}"
+    )
 
+    samples_before = _stored_rows(args.db, "samples")
     try:
         s_inserted, s_kept, s_skipped = import_samples(args.export, args.db, strict=args.strict)
     except MalformedRecordError as err:
         # The message names only the record type, never its raw value or timestamp.
         print(f"aborted: {err} (run without --strict to skip and count it)", file=sys.stderr)
         return 1
+    s_removed = samples_before + s_inserted - _stored_rows(args.db, "samples")
     skipped_note = f" (skipped {s_skipped} malformed)" if s_skipped else ""
-    print(f"imported {s_inserted} new of {s_kept} heart-rate samples{skipped_note}")
+    print(
+        f"imported {s_inserted} new of {s_kept} heart-rate samples"
+        f"{skipped_note}{_removed_note(s_removed)}"
+    )
     return 0
+
+
+def _stored_rows(db: Path, table: str) -> int:
+    """How many rows ``table`` holds in ``db``: 0 before the first import. ``main``
+    counts before and after each step, so the rows a newer export removed are the
+    rows before, plus those inserted, minus the rows after."""
+    if not db.is_file():
+        return 0
+    with closing(connect(db)) as conn:
+        has_table = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+        ).fetchone()[0]
+        return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] if has_table else 0
+
+
+def _removed_note(removed: int) -> str:
+    return f" (removed {removed} no longer in the export)" if removed else ""
 
 
 if __name__ == "__main__":
