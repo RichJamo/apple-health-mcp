@@ -12,6 +12,8 @@ fields that identify the session), and the table's PRIMARY KEY plus
 
 Public API:
 - ``connect(path)``                 -> open a connection
+- ``connect_read_only(path)``       -> open an existing database for reading only, at
+  this code's schema version (for the report and the MCP server)
 - ``init_schema(conn)``             -> create tables if absent; refuses a database
   built at another version with ``SchemaVersionError`` (see ``SCHEMA_VERSION``)
 - ``workout_id(workout)``           -> the stable hash id
@@ -34,6 +36,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, tzinfo
 from os import PathLike
+from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apple_health_mcp.parse import Workout
@@ -105,6 +108,32 @@ def connect(path: str | PathLike[str]) -> sqlite3.Connection:
     ``path`` may be ``":memory:"`` for an ephemeral database, which the tests use.
     """
     return sqlite3.connect(path)
+
+
+def connect_read_only(path: str | PathLike[str]) -> sqlite3.Connection:
+    """Open the existing database at ``path`` for reading only.
+
+    For code that must never change the data, such as the report and the MCP server.
+
+    Postconditions: SQLite refuses any write through the returned connection
+    (``mode=ro``), and no file is created.
+
+    Raises:
+    - ``FileNotFoundError`` when nothing exists at ``path`` (``connect`` would
+      quietly create an empty database there);
+    - ``SchemaVersionError`` when the database is at another version than
+      ``SCHEMA_VERSION``. An empty database file is at version 0, so it is refused
+      too, with the same remedy: import again.
+    """
+    file = Path(path)
+    if not file.is_file():
+        raise FileNotFoundError(f"no database at {file}")
+    conn = sqlite3.connect(f"{file.resolve().as_uri()}?mode=ro", uri=True)
+    found = conn.execute("PRAGMA user_version").fetchone()[0]
+    if found != SCHEMA_VERSION:
+        conn.close()
+        raise SchemaVersionError(found, SCHEMA_VERSION)
+    return conn
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
