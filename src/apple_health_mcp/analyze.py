@@ -30,9 +30,9 @@ import sqlite3
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta, tzinfo
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from datetime import UTC, date, datetime, timedelta
 
+from apple_health_mcp.db import TZ_READ_ERRORS, zone_from_tz
 from apple_health_mcp.ingest import HEART_RATE, HEART_RATE_RECOVERY, RECOVERY_WINDOW
 from apple_health_mcp.parse import MalformedRecordError
 
@@ -49,9 +49,10 @@ class StoredWorkout:
     Invariants:
     - ``start`` and ``end`` are timezone-aware datetimes in UTC.
     - ``tz`` is the export's HKTimeZone, the zone it was recorded in, such as
-      "Africa/Johannesburg"; or, when the export gave none, the offset in its
-      startDate, such as "+0200", which comes from the exporting phone's zone (see
-      ``local_start``). It is what places a workout in a local day or week.
+      "Africa/Johannesburg". When the export gave none, or the importing machine
+      could not load it, ``tz`` is the offset in startDate, such as "+0200", which
+      comes from the exporting phone's zone (see ``local_start``). It is what places
+      a workout in a local day or week.
     - ``duration_s`` and ``active_energy_kcal`` may be ``None``, as in the table.
     - ``heart_rate_average_bpm`` and ``heart_rate_maximum_bpm`` are Apple's own
       figures for the whole workout, or ``None`` when the export had none.
@@ -393,37 +394,35 @@ def local_start(workout: StoredWorkout) -> datetime:
     ``workout.tz`` is one of two things:
     - a zone name that ``zoneinfo.ZoneInfo`` accepts, such as "Africa/Johannesburg":
       the export's HKTimeZone, the zone the workout was recorded in;
-    - an offset of the form "+HHMM" / "-HHMM", such as "+0200", when the export had
-      no HKTimeZone. Apple writes every date in the zone the phone was in when the
-      export was made, so this offset comes from the exporting phone's zone, not the
-      recording zone. For a workout recorded in another zone the two differ, and the
-      export holds nothing better (docs/architecture.md, data fact 3).
+    - an offset of the form "+HHMM" / "-HHMM", such as "+0200". Usually this is the
+      startDate offset, stored when the export had no HKTimeZone or the importer
+      could not load it. Apple writes every date in the zone the phone was in when
+      the export was made, so that offset comes from the exporting phone's zone, not
+      the recording zone. For a workout recorded in another zone the two differ, and
+      the export holds nothing better (docs/architecture.md, data fact 3). An
+      HKTimeZone that is itself an offset is kept as given.
 
     Postcondition: the result is the same moment as ``workout.start`` (equal when
     compared), only with the local offset, so ``.date()`` gives the local calendar day.
 
-    Raises ``MalformedRecordError`` when ``tz`` is neither a zone this machine's time
-    zone database knows nor a "+HHMM" offset. The importer stores HKTimeZone as the
-    export gives it, so any app could have written it. The message names the
-    workout's id, not the value, and is raised outside the ``except`` block, as in
-    ``_stored_bpm``.
+    Raises ``MalformedRecordError`` when ``zone_from_tz`` cannot read ``tz``. The
+    importer stores only values this machine can read, so this means a database
+    written elsewhere: on a machine whose time zone database knew a name this one
+    does not, or by a version of this code before that check. Re-importing does not
+    repair it (an existing row is kept as it is), so the message says to rebuild. It
+    names the workout's id, not the value, and is raised outside the ``except``
+    block, as in ``_stored_bpm``.
     """
     try:
-        zone = _recorded_zone(workout.tz)
-    except (ZoneInfoNotFoundError, ValueError):
+        zone = zone_from_tz(workout.tz)
+    except TZ_READ_ERRORS:
         zone = None  # handled below, outside the except block
     if zone is None:
-        raise MalformedRecordError(f"unrecognised time zone on stored workout {workout.id}")
+        raise MalformedRecordError(
+            f"unrecognised time zone on stored workout {workout.id}; "
+            "delete the database and import again to rebuild it"
+        )
     return workout.start.astimezone(zone)
-
-
-def _recorded_zone(tz: str) -> tzinfo:
-    """The zone a stored ``tz`` value names. When the export had no HKTimeZone, the
-    importer wrote the offset with ``strftime("%z")``, so it is read back with
-    ``strptime("%z")``. A zone name never starts with a sign."""
-    if tz.startswith(("+", "-")):
-        return datetime.strptime(tz, "%z").tzinfo
-    return ZoneInfo(tz)
 
 
 def weekly_summary(sessions: Iterable[StoredWorkout]) -> list[WeekSummary]:

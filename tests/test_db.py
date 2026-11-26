@@ -4,6 +4,8 @@ These run against the synthetic fixture (tests/fixtures/sample_export.xml) — n
 real health data.
 """
 
+import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -102,3 +104,35 @@ def test_timestamp_stored_as_utc_with_zone_preserved(conn):
     assert row is not None
     assert row[0] == "2019-01-22T06:05:11+00:00"  # +0200 converted to UTC
     assert row[1] == "Africa/Johannesburg"  # HKTimeZone metadata, preserved
+
+
+@pytest.mark.parametrize("name", ["GMT+0200", "Mars/Olympus_Mons", "/etc/localtime"])
+def test_an_unloadable_zone_name_is_stored_as_the_start_offset(conn, name):
+    """Any app can write HKTimeZone. A name this machine cannot load would stop every
+    later summary, so tz gets the startDate offset instead, as when the export gives
+    no HKTimeZone. The name itself is kept in raw_metadata."""
+    workout = replace(next(iter_workouts(FIXTURE)), metadata={"HKTimeZone": name})
+    assert workout.start.strftime("%z") == "+0200"  # the fixture's offset
+
+    upsert_workouts(conn, [workout])
+
+    tz, raw_metadata = conn.execute("SELECT tz, raw_metadata FROM workouts").fetchone()
+    assert tz == "+0200"
+    assert json.loads(raw_metadata) == {"HKTimeZone": name}
+
+
+def test_a_zone_lookup_that_fails_with_an_os_error_is_stored_as_the_offset(conn, monkeypatch):
+    """With the tzdata package installed (always so on Windows), a name that is a
+    folder in it, such as "America", makes ZoneInfo raise IsADirectoryError, not
+    ZoneInfoNotFoundError. The import must treat that name as unloadable too, not
+    stop. This machine has no tzdata, so the lookup is made to fail that way."""
+
+    def lookup_that_finds_a_folder(name):
+        raise IsADirectoryError(name)
+
+    monkeypatch.setattr("apple_health_mcp.db.ZoneInfo", lookup_that_finds_a_folder)
+    workout = replace(next(iter_workouts(FIXTURE)), metadata={"HKTimeZone": "America"})
+
+    upsert_workouts(conn, [workout])
+
+    assert conn.execute("SELECT tz FROM workouts").fetchone() == ("+0200",)
